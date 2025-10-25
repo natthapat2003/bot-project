@@ -13,6 +13,7 @@ from PIL import Image
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, func
 from sqlalchemy.orm import sessionmaker, declarative_base
 import datetime
+import pytz  # <--- (ใหม่) เพิ่มเครื่องมือจัดการ Timezone
 
 from linebot.v3 import (
     WebhookHandler
@@ -43,18 +44,21 @@ PLATE_RECOGNIZER_API_KEY = os.environ.get('PLATE_RECOGNIZER_API_KEY')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 DATABASE_URL = os.environ.get('DATABASE_URL') 
 
+# --- (ใหม่) 1.1 ตั้งค่าโซนเวลา (UTC+7) ---
+TH_TIMEZONE = pytz.timezone('Asia/Bangkok')
+
 # --- 2. ตั้งค่าระบบ ---
 app = Flask(__name__)
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(CHANNEL_SECRET) # (ถ้ากุญแจถูก บรรทัดนี้จะผ่าน)
+handler = WebhookHandler(CHANNEL_SECRET)
 
 # --- 2.1 ตั้งค่า "สมอง" Gemini ---
 genai.configure(api_key=GEMINI_API_KEY)
 system_instruction = (
-    "คุณคือ 'TestPlayer' แชทบอทผู้ช่วยอัจฉยะ ที่เชี่ยวชาญการอ่านป้ายทะเบียนรถ"
+    "คุณคือ 'Bankบอท' แชทบอทผู้ช่วยอัจฉยะ ที่เชี่ยวชาญการอ่านป้ายทะเบียนรถ"
     "หน้าที่ของคุณคือพูดคุยทั่วไปด้วยภาษาไทยที่เป็นกันเองและให้ความช่วยเหลือ"
     "ถ้าผู้ใช้ขอให้อ่านป้ายทะเบียน ให้คุณตอบว่า 'แน่นอนครับ! ส่งรูปภาพหรือวิดีโอเข้ามาได้เลย'"
-    "ถ้าผู้ใช้ถาม 'รายงาน' หรือ 'กี่ป้าย' (เช่น 'รายงาน 25/10/2025') ให้ตอบกลับด้วยข้อมูลจากระบบ"
+    "ถ้าผู้ใช้ถาม 'รายงาน' หรือ 'ดู' (เช่น 'รายงาน 25/10/2025') ให้ตอบกลับด้วยข้อมูลจากระบบ"
 )
 model = genai.GenerativeModel(
     'models/gemini-flash-latest', 
@@ -72,6 +76,7 @@ class LicensePlateLog(Base):
     id = Column(Integer, primary_key=True, index=True)
     plate = Column(String, index=True)
     province = Column(String)
+    # (เราเก็บใน DB เป็น UTC เสมอ โดยใช้ server_default=func.now())
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
 
 if DATABASE_URL:
@@ -229,7 +234,7 @@ def handle_video_message(event):
         finally:
             if os.path.exists(video_path): os.remove(video_path)
 
-# --- 6. สอนบอท: ถ้าได้รับ "ข้อความ" (อัปเกรด: "รายงานตามวันที่") ---
+# --- 6. สอนบอท: ถ้าได้รับ "ข้อความ" (อัปเกรด: "รายงาน" + "ดูข้อมูล") ---
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
     user_text = event.message.text.strip()
@@ -238,54 +243,95 @@ def handle_text_message(event):
         line_bot_api = MessagingApi(api_client)
         reply_text = "" 
         
-        # --- (ใหม่) ตรวจจับคำสั่ง "รายงาน" ---
-        if user_text.startswith("รายงาน"):
-            if not SessionLocal:
-                reply_text = "ขออภัยครับ ระบบฐานข้อมูล (สมุดบันทึก) มีปัญหา ไม่สามารถดูรายงานได้"
-            else:
-                session = SessionLocal()
-                try:
-                    parts = user_text.split() 
-                    
-                    # --- ถ้าเป็น "รายงาน 25/10/2025" ---
-                    if len(parts) == 2:
-                        date_str = parts[1]
-                        try:
-                            query_date = datetime.datetime.strptime(date_str, "%d/%m/%Y").date()
-                            start_utc = query_date
-                            end_utc = start_utc + datetime.timedelta(days=1)
-                            count_specific_day = session.query(func.count(LicensePlateLog.id)).filter(
-                                LicensePlateLog.timestamp >= start_utc,
-                                LicensePlateLog.timestamp < end_utc
-                            ).scalar()
-                            reply_text = f"📊 รายงานยอดวันที่ {date_str} (UTC):\n\n"
-                            reply_text += f"บันทึกไปทั้งหมด: {count_specific_day} ป้าย"
-                        except ValueError:
-                            reply_text = "ขออภัยครับ รูปแบบวันที่ไม่ถูกต้อง 😅\n"
-                            reply_text += "กรุณาใช้ 'รายงาน DD/MM/YYYY'\n"
-                            reply_text += "(เช่น: 'รายงาน 25/10/2025')"
-                    
-                    # --- ถ้าเป็น "รายงาน" (คำเดียว) ---
-                    elif len(parts) == 1:
-                        today_start_utc = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-                        count_today = session.query(func.count(LicensePlateLog.id)).filter(
-                            LicensePlateLog.timestamp >= today_start_utc
-                        ).scalar()
-                        count_all = session.query(func.count(LicensePlateLog.id)).scalar()
-                        reply_text = f"📊 รายงานสรุป 'Bankบอท' (UTC):\n\n"
-                        reply_text += f"วันนี้บันทึกไปแล้ว: {count_today} ป้าย\n"
-                        reply_text += f"ยอดรวมทั้งหมด: {count_all} ป้าย"
-                    
-                    else:
-                        reply_text = "ขออภัยครับ ไม่เข้าใจคำสั่งรายงาน\n"
-                        reply_text += "- พิมพ์ 'รายงาน' (เพื่อดูยอดวันนี้)\n"
-                        reply_text += "- พิมพ์ 'รายงาน 25/10/2025' (เพื่อดูยอดตามวันที่)"
-                except Exception as e:
-                    reply_text = f"ขออภัยครับ ดึงรายงานไม่สำเร็จ: {e}"
-                finally:
-                    session.close()
+        if not SessionLocal:
+             reply_text = "ขออภัยครับ ระบบฐานข้อมูล (สมุดบันทึก) มีปัญหา"
         
-        # --- (เดิม) ถ้าไม่ใช่ "รายงาน" ให้ Gemini คุย ---
+        # --- (ใหม่) A: ถ้าผู้ใช้พิมพ์ "รายงาน" (เพื่อดู "จำนวน") ---
+        elif user_text.startswith("รายงาน"):
+            session = SessionLocal()
+            try:
+                parts = user_text.split()
+                
+                # --- A1: "รายงาน 25/10/2025" ---
+                if len(parts) == 2:
+                    date_str = parts[1]
+                    try:
+                        # 1. แปลง "25/10/2025" (เวลาไทย)
+                        naive_date = datetime.datetime.strptime(date_str, "%d/%m/%Y")
+                        # 2. บอกว่านี่คือเวลา "เที่ยงคืน" (00:00) ที่ "ไทย" (UTC+7)
+                        start_th_aware = TH_TIMEZONE.localize(naive_date)
+                        # 3. แปลงกลับไปเป็น UTC เพื่อค้นหา
+                        start_utc = start_th_aware.astimezone(pytz.utc)
+                        end_utc = start_utc + datetime.timedelta(days=1)
+
+                        count = session.query(func.count(LicensePlateLog.id)).filter(
+                            LicensePlateLog.timestamp >= start_utc,
+                            LicensePlateLog.timestamp < end_utc
+                        ).scalar()
+                        reply_text = f"📊 รายงานยอดวันที่ {date_str} (เวลาไทย):\nบันทึกไปทั้งหมด: {count} ป้าย"
+                    except ValueError:
+                        reply_text = "รูปแบบวันที่ไม่ถูกต้อง 😅\nกรุณาใช้ 'รายงาน DD/MM/YYYY'"
+                
+                # --- A2: "รายงาน" (คำเดียว) ---
+                elif len(parts) == 1:
+                    # 1. หา "วันนี้" (เวลาไทย)
+                    now_th = datetime.datetime.now(TH_TIMEZONE)
+                    # 2. หา "เที่ยงคืน" (เวลาไทย)
+                    today_start_th_aware = now_th.replace(hour=0, minute=0, second=0, microsecond=0)
+                    # 3. แปลงกลับไปเป็น UTC เพื่อค้นหา
+                    today_start_utc = today_start_th_aware.astimezone(pytz.utc)
+                    
+                    count_today = session.query(func.count(LicensePlateLog.id)).filter(
+                        LicensePlateLog.timestamp >= today_start_utc
+                    ).scalar()
+                    count_all = session.query(func.count(LicensePlateLog.id)).scalar()
+                    
+                    reply_text = f"📊 รายงานสรุป 'Bankบอท' (เวลาไทย):\n\n"
+                    reply_text += f"วันนี้บันทึกไปแล้ว: {count_today} ป้าย\n"
+                    reply_text += f"ยอดรวมทั้งหมด: {count_all} ป้าย"
+                else:
+                    reply_text = "ไม่เข้าใจคำสั่งรายงานครับ 😅"
+            except Exception as e:
+                reply_text = f"ขออภัยครับ ดึงรายงานไม่สำเร็จ: {e}"
+            finally:
+                session.close()
+
+        # --- (ใหม่) B: ถ้าผู้ใช้พิมพ์ "ดู" (เพื่อดู "ข้อมูล") ---
+        elif user_text.startswith("ดู "):
+            session = SessionLocal()
+            try:
+                parts = user_text.split()
+                if len(parts) == 2:
+                    date_str = parts[1]
+                    try:
+                        # (แปลงเวลาไทย ➡️ UTC เหมือนเดิม)
+                        naive_date = datetime.datetime.strptime(date_str, "%d/%m/%Y")
+                        start_th_aware = TH_TIMEZONE.localize(naive_date)
+                        start_utc = start_th_aware.astimezone(pytz.utc)
+                        end_utc = start_utc + datetime.timedelta(days=1)
+
+                        # (เปลี่ยนจาก .count() เป็น .query(...))
+                        logs = session.query(LicensePlateLog.plate, LicensePlateLog.province).filter(
+                            LicensePlateLog.timestamp >= start_utc,
+                            LicensePlateLog.timestamp < end_utc
+                        ).limit(30).all() # (จำกัดแค่ 30 รายการแรก กันข้อความยาวเกิน)
+                        
+                        if not logs:
+                            reply_text = f"ไม่พบข้อมูลป้ายทะเบียนในวันที่ {date_str} ครับ"
+                        else:
+                            reply_text = f"📋 ข้อมูลป้ายทะเบียน วันที่ {date_str}:\n(แสดง 30 รายการแรก)\n\n"
+                            for i, (plate, province) in enumerate(logs):
+                                reply_text += f"{i+1}. {plate} (จ. {province})\n"
+                    except ValueError:
+                        reply_text = "รูปแบบวันที่ไม่ถูกต้อง 😅\nกรุณาใช้ 'ดู DD/MM/YYYY'"
+                else:
+                    reply_text = "คำสั่ง 'ดู' ต้องตามด้วยวันที่ครับ\n(เช่น: 'ดู 25/10/2025')"
+            except Exception as e:
+                reply_text = f"ขออภัยครับ ดึงข้อมูลไม่สำเร็จ: {e}"
+            finally:
+                session.close()
+        
+        # --- (เดิม) C: ถ้าไม่ใช่ "รายงาน" หรือ "ดู" ให้ Gemini คุย ---
         else:
             try:
                 response = chat.send_message(user_text)
@@ -301,8 +347,8 @@ def handle_text_message(event):
             )
         )
 
-# --- 7. สอนบอท: ถ้าได้รับ "อย่างอื่น" (เช่น สติกเกอร์) (‼️ แก้ไขบั๊กแล้ว ‼️) ---
-@handler.default() # <--- (แก้ไขจาก 'TextMessageContent' เป็น .default() แล้ว)
+# --- 7. สอนบอท: ถ้าได้รับ "อย่างอื่น" (เช่น สติกเกอร์) ---
+@handler.default() 
 def default(event):
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)

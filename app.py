@@ -12,7 +12,7 @@ from PIL import Image
 # (เครื่องมือฐานข้อมูล)
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, func
 from sqlalchemy.orm import sessionmaker, declarative_base
-import datetime  # <--- (สำคัญสำหรับคำนวณวันที่)
+import datetime
 
 from linebot.v3 import (
     WebhookHandler
@@ -46,12 +46,12 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 # --- 2. ตั้งค่าระบบ ---
 app = Flask(__name__)
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(CHANNEL_SECRET)
+handler = WebhookHandler(CHANNEL_SECRET) # (ถ้ากุญแจถูก บรรทัดนี้จะผ่าน)
 
 # --- 2.1 ตั้งค่า "สมอง" Gemini ---
 genai.configure(api_key=GEMINI_API_KEY)
 system_instruction = (
-    "คุณคือ 'Bankบอท' แชทบอทผู้ช่วยอัจฉยะ ที่เชี่ยวชาญการอ่านป้ายทะเบียนรถ"
+    "คุณคือ 'TestPlayer' แชทบอทผู้ช่วยอัจฉยะ ที่เชี่ยวชาญการอ่านป้ายทะเบียนรถ"
     "หน้าที่ของคุณคือพูดคุยทั่วไปด้วยภาษาไทยที่เป็นกันเองและให้ความช่วยเหลือ"
     "ถ้าผู้ใช้ขอให้อ่านป้ายทะเบียน ให้คุณตอบว่า 'แน่นอนครับ! ส่งรูปภาพหรือวิดีโอเข้ามาได้เลย'"
     "ถ้าผู้ใช้ถาม 'รายงาน' หรือ 'กี่ป้าย' (เช่น 'รายงาน 25/10/2025') ให้ตอบกลับด้วยข้อมูลจากระบบ"
@@ -115,7 +115,7 @@ def callback():
         abort(400)
     return 'OK'
 
-# --- 4. สอนบอท: ถ้าได้รับ "รูปภาพ" (อัปเกรด: บันทึกลง DB) ---
+# --- 4. สอนบอท: ถ้าได้รับ "รูปภาพ" ---
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     with ApiClient(configuration) as api_client:
@@ -142,7 +142,7 @@ def handle_image_message(event):
                 plate_number = plate_line.split(":")[-1].strip()
                 province = prov_line.split(":")[-1].strip()
                 if plate_number and province not in ["ไม่ชัดเจน", "ไม่พบจังหวัด"]:
-                    log_plate_to_db(plate_number, province) # <--- บันทึกลง DB
+                    log_plate_to_db(plate_number, province) 
             except Exception as e:
                 print(f"ไม่สามารถแยกข้อมูลจาก Gemini เพื่อ log: {e}")
             reply_text = gemini_response 
@@ -155,7 +155,7 @@ def handle_image_message(event):
             )
         )
 
-# --- 5. สอนบอท: ถ้าได้รับ "วิดีโอ" (อัปเกรด: บันทึกลง DB) ---
+# --- 5. สอนบอท: ถ้าได้รับ "วิดีโอ" ---
 @handler.add(MessageEvent, message=VideoMessageContent)
 def handle_video_message(event):
     with ApiClient(configuration) as api_client:
@@ -205,7 +205,7 @@ def handle_video_message(event):
                         province = result['region']['name']
                     plate_full_name = f"{plate_number} (จ. {province})"
                     if plate_full_name not in found_plates_set:
-                        log_plate_to_db(plate_number, province) # <--- บันทึกลง DB
+                        log_plate_to_db(plate_number, province) 
                         found_plates_set.add(plate_full_name) 
             cap.release()
             
@@ -232,11 +232,11 @@ def handle_video_message(event):
 # --- 6. สอนบอท: ถ้าได้รับ "ข้อความ" (อัปเกรด: "รายงานตามวันที่") ---
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
-    user_text = event.message.text.strip() # .strip() เพื่อตัดช่องว่างหน้า-หลัง
+    user_text = event.message.text.strip()
     
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
-        reply_text = "" # สร้างตัวแปรเปล่าไว้ก่อน
+        reply_text = "" 
         
         # --- (ใหม่) ตรวจจับคำสั่ง "รายงาน" ---
         if user_text.startswith("รายงาน"):
@@ -245,54 +245,41 @@ def handle_text_message(event):
             else:
                 session = SessionLocal()
                 try:
-                    parts = user_text.split() # แยกคำ (เช่น "รายงาน", "25/10/2025")
+                    parts = user_text.split() 
                     
-                    # --- (ใหม่) ถ้าเป็น "รายงาน 25/10/2025" ---
+                    # --- ถ้าเป็น "รายงาน 25/10/2025" ---
                     if len(parts) == 2:
                         date_str = parts[1]
                         try:
-                            # พยายามแปลง "DD/MM/YYYY" เป็น "วันที่" (Date Object)
                             query_date = datetime.datetime.strptime(date_str, "%d/%m/%Y").date()
-                            
-                            # (หมายเหตุ: เราจะค้นหาตามปฏิทิน UTC ของเซิร์ฟเวอร์)
                             start_utc = query_date
                             end_utc = start_utc + datetime.timedelta(days=1)
-
-                            # ค้นหาใน DB
                             count_specific_day = session.query(func.count(LicensePlateLog.id)).filter(
                                 LicensePlateLog.timestamp >= start_utc,
                                 LicensePlateLog.timestamp < end_utc
                             ).scalar()
-                            
                             reply_text = f"📊 รายงานยอดวันที่ {date_str} (UTC):\n\n"
                             reply_text += f"บันทึกไปทั้งหมด: {count_specific_day} ป้าย"
-
                         except ValueError:
-                            # ถ้าพิมพ์วันที่ผิดรูปแบบ (เช่น 25-10-2025)
                             reply_text = "ขออภัยครับ รูปแบบวันที่ไม่ถูกต้อง 😅\n"
                             reply_text += "กรุณาใช้ 'รายงาน DD/MM/YYYY'\n"
                             reply_text += "(เช่น: 'รายงาน 25/10/2025')"
                     
-                    # --- (เดิม) ถ้าเป็น "รายงาน" (คำเดียว) ---
+                    # --- ถ้าเป็น "รายงาน" (คำเดียว) ---
                     elif len(parts) == 1:
-                        # (เวลา UTC ของเซิร์ฟเวอร์)
                         today_start_utc = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-                        
                         count_today = session.query(func.count(LicensePlateLog.id)).filter(
                             LicensePlateLog.timestamp >= today_start_utc
                         ).scalar()
                         count_all = session.query(func.count(LicensePlateLog.id)).scalar()
-                        
                         reply_text = f"📊 รายงานสรุป 'Bankบอท' (UTC):\n\n"
                         reply_text += f"วันนี้บันทึกไปแล้ว: {count_today} ป้าย\n"
                         reply_text += f"ยอดรวมทั้งหมด: {count_all} ป้าย"
                     
-                    # ถ้าพิมพ์แปลกๆ เช่น "รายงาน ก ข ค"
                     else:
                         reply_text = "ขออภัยครับ ไม่เข้าใจคำสั่งรายงาน\n"
                         reply_text += "- พิมพ์ 'รายงาน' (เพื่อดูยอดวันนี้)\n"
                         reply_text += "- พิมพ์ 'รายงาน 25/10/2025' (เพื่อดูยอดตามวันที่)"
-
                 except Exception as e:
                     reply_text = f"ขออภัยครับ ดึงรายงานไม่สำเร็จ: {e}"
                 finally:
@@ -314,8 +301,8 @@ def handle_text_message(event):
             )
         )
 
-# --- 7. สอนบอท: ถ้าได้รับ "อย่างอื่น" (เช่น สติกเกอร์) ---
-@handler.add(MessageEvent, message=TextMessageContent)
+# --- 7. สอนบอท: ถ้าได้รับ "อย่างอื่น" (เช่น สติกเกอร์) (‼️ แก้ไขบั๊กแล้ว ‼️) ---
+@handler.default() # <--- (แก้ไขจาก 'TextMessageContent' เป็น .default() แล้ว)
 def default(event):
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)

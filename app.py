@@ -9,11 +9,10 @@ import google.generativeai as genai
 import io
 from PIL import Image
 
-# --- (ใหม่) เพิ่มเครื่องมือฐานข้อมูล ---
+# (เครื่องมือฐานข้อมูล)
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, func
 from sqlalchemy.orm import sessionmaker, declarative_base
-import datetime
-# --- จบส่วนเครื่องมือฐานข้อมูล ---
+import datetime  # <--- (สำคัญสำหรับคำนวณวันที่)
 
 from linebot.v3 import (
     WebhookHandler
@@ -42,7 +41,7 @@ CHANNEL_ACCESS_TOKEN = os.environ.get('CHANNEL_ACCESS_TOKEN')
 CHANNEL_SECRET = os.environ.get('CHANNEL_SECRET')
 PLATE_RECOGNIZER_API_KEY = os.environ.get('PLATE_RECOGNIZER_API_KEY')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-DATABASE_URL = os.environ.get('DATABASE_URL') # <--- (ใหม่) กุญแจดอกที่ 5
+DATABASE_URL = os.environ.get('DATABASE_URL') 
 
 # --- 2. ตั้งค่าระบบ ---
 app = Flask(__name__)
@@ -52,10 +51,10 @@ handler = WebhookHandler(CHANNEL_SECRET)
 # --- 2.1 ตั้งค่า "สมอง" Gemini ---
 genai.configure(api_key=GEMINI_API_KEY)
 system_instruction = (
-    "คุณคือ 'Bankบอท' แชทบอทผู้ช่วยอัจฉริยะ ที่เชี่ยวชาญการอ่านป้ายทะเบียนรถ"
+    "คุณคือ 'Bankบอท' แชทบอทผู้ช่วยอัจฉยะ ที่เชี่ยวชาญการอ่านป้ายทะเบียนรถ"
     "หน้าที่ของคุณคือพูดคุยทั่วไปด้วยภาษาไทยที่เป็นกันเองและให้ความช่วยเหลือ"
     "ถ้าผู้ใช้ขอให้อ่านป้ายทะเบียน ให้คุณตอบว่า 'แน่นอนครับ! ส่งรูปภาพหรือวิดีโอเข้ามาได้เลย'"
-    "ถ้าผู้ใช้ถาม 'รายงาน' หรือ 'กี่ป้าย' ให้ตอบกลับด้วยข้อมูลจากระบบ"
+    "ถ้าผู้ใช้ถาม 'รายงาน' หรือ 'กี่ป้าย' (เช่น 'รายงาน 25/10/2025') ให้ตอบกลับด้วยข้อมูลจากระบบ"
 )
 model = genai.GenerativeModel(
     'models/gemini-flash-latest', 
@@ -63,7 +62,7 @@ model = genai.GenerativeModel(
 )
 chat = model.start_chat(history=[])
 
-# --- (ใหม่) 2.2 ตั้งค่า "สมุดบันทึก" (Database) ---
+# --- 2.2 ตั้งค่า "สมุดบันทึก" (Database) ---
 Base = declarative_base()
 engine = None
 SessionLocal = None
@@ -77,12 +76,10 @@ class LicensePlateLog(Base):
 
 if DATABASE_URL:
     try:
-        # (Render ใช้ 'postgres://' แต่ SQLAlchemy ชอบ 'postgresql://')
         if DATABASE_URL.startswith("postgres://"):
             DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-            
         engine = create_engine(DATABASE_URL)
-        Base.metadata.create_all(bind=engine) # สร้างตารางอัตโนมัติ (ถ้ายังไม่มี)
+        Base.metadata.create_all(bind=engine) 
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
         print("Database (สมุดบันทึก) เชื่อมต่อสำเร็จ!")
     except Exception as e:
@@ -90,12 +87,11 @@ if DATABASE_URL:
 else:
     print("ไม่พบ DATABASE_URL! ระบบบันทึกข้อมูลจะถูกปิดใช้งาน")
 
-# --- (ใหม่) ฟังก์ชันช่วยบันทึก (Helper Function) ---
+# --- (ฟังก์ชันช่วยบันทึก) ---
 def log_plate_to_db(plate_number, province_name):
-    if not SessionLocal: # ถ้าฐานข้อมูลเชื่อมต่อไม่สำเร็จ
+    if not SessionLocal: 
         print("DB logging skipped (no session).")
         return
-
     session = SessionLocal()
     try:
         new_log = LicensePlateLog(plate=plate_number, province=province_name)
@@ -140,25 +136,18 @@ def handle_image_message(event):
             )
             response = model.generate_content([prompt_text, img])
             gemini_response = response.text
-            
-            # (พยายามดึงข้อมูลจากที่ Gemini อ่าน เพื่อบันทึก)
             try:
                 plate_line = [line for line in gemini_response.split('\n') if "เลขทะเบียน:" in line][0]
                 prov_line = [line for line in gemini_response.split('\n') if "จังหวัด:" in line][0]
-                
                 plate_number = plate_line.split(":")[-1].strip()
                 province = prov_line.split(":")[-1].strip()
-
                 if plate_number and province not in ["ไม่ชัดเจน", "ไม่พบจังหวัด"]:
-                    log_plate_to_db(plate_number, province) # <--- (ใหม่) บันทึกลง DB
+                    log_plate_to_db(plate_number, province) # <--- บันทึกลง DB
             except Exception as e:
                 print(f"ไม่สามารถแยกข้อมูลจาก Gemini เพื่อ log: {e}")
-            
-            reply_text = gemini_response # ตอบกลับด้วยสิ่งที่ Gemini อ่านได้
-            
+            reply_text = gemini_response 
         except Exception as e:
             reply_text = f"เกิดข้อผิดพลาด (Gemini Vision): {e}"
-            
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
@@ -180,7 +169,6 @@ def handle_video_message(event):
                 messages=[TextMessage(text='ได้รับวิดีโอแล้ว กำลังประมวลผล (ป้ายไทย)... ⏳')]
             )
         )
-
         video_content = line_bot_blob_api.get_message_content(
             message_id=event.message.id
         )
@@ -190,8 +178,7 @@ def handle_video_message(event):
                 temp_video.write(video_content)
                 video_path = temp_video.name
             cap = cv2.VideoCapture(video_path)
-            found_plates_set = set() # (สำหรับกันป้ายซ้ำ)
-            
+            found_plates_set = set() 
             frame_count = 0
             while cap.isOpened():
                 ret, frame = cap.read()
@@ -216,10 +203,9 @@ def handle_video_message(event):
                     province = "(ไม่พบจังหวัด)"
                     if result.get('region') and result['region'].get('name') and result['region']['name'] != 'Thailand':
                         province = result['region']['name']
-                    
                     plate_full_name = f"{plate_number} (จ. {province})"
                     if plate_full_name not in found_plates_set:
-                        log_plate_to_db(plate_number, province) # <--- (ใหม่) บันทึกลง DB
+                        log_plate_to_db(plate_number, province) # <--- บันทึกลง DB
                         found_plates_set.add(plate_full_name) 
             cap.release()
             
@@ -227,7 +213,6 @@ def handle_video_message(event):
                 final_text = f"ผลการประมวลผลวิดีโอ:\n" + "\n".join(found_plates_set)
             else:
                 final_text = "ผลการประมวลผลวิดีโอ:\nไม่พบป้ายทะเบียนครับ"
-
             line_bot_api.push_message( 
                 PushMessageRequest( 
                     to=user_id,
@@ -244,60 +229,93 @@ def handle_video_message(event):
         finally:
             if os.path.exists(video_path): os.remove(video_path)
 
-# --- 6. สอนบอท: ถ้าได้รับ "ข้อความ" (อัปเกรด: เพิ่ม "รายงาน") ---
+# --- 6. สอนบอท: ถ้าได้รับ "ข้อความ" (อัปเกรด: "รายงานตามวันที่") ---
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
-    user_text = event.message.text 
+    user_text = event.message.text.strip() # .strip() เพื่อตัดช่องว่างหน้า-หลัง
     
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
-        gemini_reply = ""
+        reply_text = "" # สร้างตัวแปรเปล่าไว้ก่อน
         
         # --- (ใหม่) ตรวจจับคำสั่ง "รายงาน" ---
-        if "รายงาน" in user_text or "กี่ป้าย" in user_text:
+        if user_text.startswith("รายงาน"):
             if not SessionLocal:
-                gemini_reply = "ขออภัยครับ ระบบฐานข้อมูล (สมุดบันทึก) มีปัญหา ไม่สามารถดูรายงานได้"
+                reply_text = "ขออภัยครับ ระบบฐานข้อมูล (สมุดบันทึก) มีปัญหา ไม่สามารถดูรายงานได้"
             else:
                 session = SessionLocal()
                 try:
-                    # (เราจะนับ "วันนี้" โดยอิงตามเวลาสากล (UTC) ของเซิร์ฟเวอร์ก่อนนะครับ)
-                    today_start_utc = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                    parts = user_text.split() # แยกคำ (เช่น "รายงาน", "25/10/2025")
                     
-                    # 1. นับยอด "วันนี้" (ตามเวลา UTC)
-                    count_today = session.query(func.count(LicensePlateLog.id)).filter(
-                        LicensePlateLog.timestamp >= today_start_utc
-                    ).scalar()
+                    # --- (ใหม่) ถ้าเป็น "รายงาน 25/10/2025" ---
+                    if len(parts) == 2:
+                        date_str = parts[1]
+                        try:
+                            # พยายามแปลง "DD/MM/YYYY" เป็น "วันที่" (Date Object)
+                            query_date = datetime.datetime.strptime(date_str, "%d/%m/%Y").date()
+                            
+                            # (หมายเหตุ: เราจะค้นหาตามปฏิทิน UTC ของเซิร์ฟเวอร์)
+                            start_utc = query_date
+                            end_utc = start_utc + datetime.timedelta(days=1)
 
-                    # 2. นับยอด "ทั้งหมด"
-                    count_all = session.query(func.count(LicensePlateLog.id)).scalar()
+                            # ค้นหาใน DB
+                            count_specific_day = session.query(func.count(LicensePlateLog.id)).filter(
+                                LicensePlateLog.timestamp >= start_utc,
+                                LicensePlateLog.timestamp < end_utc
+                            ).scalar()
+                            
+                            reply_text = f"📊 รายงานยอดวันที่ {date_str} (UTC):\n\n"
+                            reply_text += f"บันทึกไปทั้งหมด: {count_specific_day} ป้าย"
+
+                        except ValueError:
+                            # ถ้าพิมพ์วันที่ผิดรูปแบบ (เช่น 25-10-2025)
+                            reply_text = "ขออภัยครับ รูปแบบวันที่ไม่ถูกต้อง 😅\n"
+                            reply_text += "กรุณาใช้ 'รายงาน DD/MM/YYYY'\n"
+                            reply_text += "(เช่น: 'รายงาน 25/10/2025')"
                     
-                    gemini_reply = f"📊 รายงานสรุป 'Bankบอท' (UTC):\n\n"
-                    gemini_reply += f"วันนี้บันทึกไปแล้ว: {count_today} ป้าย\n"
-                    gemini_reply += f"ยอดรวมทั้งหมด: {count_all} ป้าย"
+                    # --- (เดิม) ถ้าเป็น "รายงาน" (คำเดียว) ---
+                    elif len(parts) == 1:
+                        # (เวลา UTC ของเซิร์ฟเวอร์)
+                        today_start_utc = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                        
+                        count_today = session.query(func.count(LicensePlateLog.id)).filter(
+                            LicensePlateLog.timestamp >= today_start_utc
+                        ).scalar()
+                        count_all = session.query(func.count(LicensePlateLog.id)).scalar()
+                        
+                        reply_text = f"📊 รายงานสรุป 'Bankบอท' (UTC):\n\n"
+                        reply_text += f"วันนี้บันทึกไปแล้ว: {count_today} ป้าย\n"
+                        reply_text += f"ยอดรวมทั้งหมด: {count_all} ป้าย"
                     
+                    # ถ้าพิมพ์แปลกๆ เช่น "รายงาน ก ข ค"
+                    else:
+                        reply_text = "ขออภัยครับ ไม่เข้าใจคำสั่งรายงาน\n"
+                        reply_text += "- พิมพ์ 'รายงาน' (เพื่อดูยอดวันนี้)\n"
+                        reply_text += "- พิมพ์ 'รายงาน 25/10/2025' (เพื่อดูยอดตามวันที่)"
+
                 except Exception as e:
-                    gemini_reply = f"ขออภัยครับ ดึงรายงานไม่สำเร็จ: {e}"
+                    reply_text = f"ขออภัยครับ ดึงรายงานไม่สำเร็จ: {e}"
                 finally:
                     session.close()
         
-        # --- (เดิม) ถ้าไม่ใช่รายงาน ให้ Gemini คุย ---
+        # --- (เดิม) ถ้าไม่ใช่ "รายงาน" ให้ Gemini คุย ---
         else:
             try:
                 response = chat.send_message(user_text)
-                gemini_reply = response.text 
+                reply_text = response.text 
             except Exception as e:
-                gemini_reply = f"ขออภัยครับ สมองผมกำลังมีปัญหา: {e}"
+                reply_text = f"ขออภัยครับ สมองผมกำลังมีปัญหา: {e}"
 
         # ตอบกลับผู้ใช้
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text=gemini_reply)]
+                messages=[TextMessage(text=reply_text)]
             )
         )
 
 # --- 7. สอนบอท: ถ้าได้รับ "อย่างอื่น" (เช่น สติกเกอร์) ---
-@handler.default()
+@handler.add(MessageEvent, message=TextMessageContent)
 def default(event):
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)

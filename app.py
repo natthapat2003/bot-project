@@ -13,7 +13,7 @@ from PIL import Image
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, func
 from sqlalchemy.orm import sessionmaker, declarative_base
 import datetime
-import pytz  # <--- (ใหม่) เพิ่มเครื่องมือจัดการ Timezone
+import pytz # (เครื่องมือจัดการ Timezone)
 
 from linebot.v3 import (
     WebhookHandler
@@ -44,7 +44,7 @@ PLATE_RECOGNIZER_API_KEY = os.environ.get('PLATE_RECOGNIZER_API_KEY')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 DATABASE_URL = os.environ.get('DATABASE_URL') 
 
-# --- (ใหม่) 1.1 ตั้งค่าโซนเวลา (UTC+7) ---
+# --- 1.1 ตั้งค่าโซนเวลา (UTC+7) ---
 TH_TIMEZONE = pytz.timezone('Asia/Bangkok')
 
 # --- 2. ตั้งค่าระบบ ---
@@ -76,7 +76,7 @@ class LicensePlateLog(Base):
     id = Column(Integer, primary_key=True, index=True)
     plate = Column(String, index=True)
     province = Column(String)
-    # (เราเก็บใน DB เป็น UTC เสมอ โดยใช้ server_default=func.now())
+    # (เราเก็บใน DB เป็น UTC เสมอ)
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
 
 if DATABASE_URL:
@@ -234,7 +234,7 @@ def handle_video_message(event):
         finally:
             if os.path.exists(video_path): os.remove(video_path)
 
-# --- 6. สอนบอท: ถ้าได้รับ "ข้อความ" (อัปเกรด: "รายงาน" + "ดูข้อมูล") ---
+# --- 6. สอนบอท: ถ้าได้รับ "ข้อความ" (อัปเกรด: "รายงาน" + "ดูข้อมูล" + "เวลา" ⏰) ---
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
     user_text = event.message.text.strip()
@@ -246,7 +246,7 @@ def handle_text_message(event):
         if not SessionLocal:
              reply_text = "ขออภัยครับ ระบบฐานข้อมูล (สมุดบันทึก) มีปัญหา"
         
-        # --- (ใหม่) A: ถ้าผู้ใช้พิมพ์ "รายงาน" (เพื่อดู "จำนวน") ---
+        # --- A: ถ้าผู้ใช้พิมพ์ "รายงาน" (เพื่อดู "จำนวน") ---
         elif user_text.startswith("รายงาน"):
             session = SessionLocal()
             try:
@@ -256,14 +256,10 @@ def handle_text_message(event):
                 if len(parts) == 2:
                     date_str = parts[1]
                     try:
-                        # 1. แปลง "25/10/2025" (เวลาไทย)
                         naive_date = datetime.datetime.strptime(date_str, "%d/%m/%Y")
-                        # 2. บอกว่านี่คือเวลา "เที่ยงคืน" (00:00) ที่ "ไทย" (UTC+7)
                         start_th_aware = TH_TIMEZONE.localize(naive_date)
-                        # 3. แปลงกลับไปเป็น UTC เพื่อค้นหา
                         start_utc = start_th_aware.astimezone(pytz.utc)
                         end_utc = start_utc + datetime.timedelta(days=1)
-
                         count = session.query(func.count(LicensePlateLog.id)).filter(
                             LicensePlateLog.timestamp >= start_utc,
                             LicensePlateLog.timestamp < end_utc
@@ -274,18 +270,13 @@ def handle_text_message(event):
                 
                 # --- A2: "รายงาน" (คำเดียว) ---
                 elif len(parts) == 1:
-                    # 1. หา "วันนี้" (เวลาไทย)
                     now_th = datetime.datetime.now(TH_TIMEZONE)
-                    # 2. หา "เที่ยงคืน" (เวลาไทย)
                     today_start_th_aware = now_th.replace(hour=0, minute=0, second=0, microsecond=0)
-                    # 3. แปลงกลับไปเป็น UTC เพื่อค้นหา
                     today_start_utc = today_start_th_aware.astimezone(pytz.utc)
-                    
                     count_today = session.query(func.count(LicensePlateLog.id)).filter(
                         LicensePlateLog.timestamp >= today_start_utc
                     ).scalar()
                     count_all = session.query(func.count(LicensePlateLog.id)).scalar()
-                    
                     reply_text = f"📊 รายงานสรุป 'Bankบอท' (เวลาไทย):\n\n"
                     reply_text += f"วันนี้บันทึกไปแล้ว: {count_today} ป้าย\n"
                     reply_text += f"ยอดรวมทั้งหมด: {count_all} ป้าย"
@@ -296,7 +287,7 @@ def handle_text_message(event):
             finally:
                 session.close()
 
-        # --- (ใหม่) B: ถ้าผู้ใช้พิมพ์ "ดู" (เพื่อดู "ข้อมูล") ---
+        # --- B: ถ้าผู้ใช้พิมพ์ "ดู" (เพื่อดู "ข้อมูล" + "เวลา" ⏰) ---
         elif user_text.startswith("ดู "):
             session = SessionLocal()
             try:
@@ -304,24 +295,33 @@ def handle_text_message(event):
                 if len(parts) == 2:
                     date_str = parts[1]
                     try:
-                        # (แปลงเวลาไทย ➡️ UTC เหมือนเดิม)
                         naive_date = datetime.datetime.strptime(date_str, "%d/%m/%Y")
                         start_th_aware = TH_TIMEZONE.localize(naive_date)
                         start_utc = start_th_aware.astimezone(pytz.utc)
                         end_utc = start_utc + datetime.timedelta(days=1)
 
-                        # (เปลี่ยนจาก .count() เป็น .query(...))
-                        logs = session.query(LicensePlateLog.plate, LicensePlateLog.province).filter(
+                        # (❗ แก้ไข Query: ดึง timestamp มาด้วย)
+                        logs = session.query(
+                            LicensePlateLog.plate, 
+                            LicensePlateLog.province, 
+                            LicensePlateLog.timestamp # <--- ดึงเวลา (UTC) มา
+                        ).filter(
                             LicensePlateLog.timestamp >= start_utc,
                             LicensePlateLog.timestamp < end_utc
-                        ).limit(30).all() # (จำกัดแค่ 30 รายการแรก กันข้อความยาวเกิน)
+                        ).order_by(LicensePlateLog.timestamp).limit(30).all() # (เรียงตามเวลา)
                         
                         if not logs:
                             reply_text = f"ไม่พบข้อมูลป้ายทะเบียนในวันที่ {date_str} ครับ"
                         else:
                             reply_text = f"📋 ข้อมูลป้ายทะเบียน วันที่ {date_str}:\n(แสดง 30 รายการแรก)\n\n"
-                            for i, (plate, province) in enumerate(logs):
-                                reply_text += f"{i+1}. {plate} (จ. {province})\n"
+                            
+                            # (❗ แก้ไข Loop: เพิ่มการแสดงเวลา)
+                            for i, (plate, province, timestamp_utc) in enumerate(logs):
+                                # แปลงเวลา UTC กลับเป็นไทย
+                                timestamp_th = timestamp_utc.astimezone(TH_TIMEZONE)
+                                # จัดรูปแบบ "HH:MM น."
+                                time_str = timestamp_th.strftime('%H:%M น.') 
+                                reply_text += f"* เวลา {time_str}: {plate} (จ. {province})\n"
                     except ValueError:
                         reply_text = "รูปแบบวันที่ไม่ถูกต้อง 😅\nกรุณาใช้ 'ดู DD/MM/YYYY'"
                 else:
@@ -331,7 +331,7 @@ def handle_text_message(event):
             finally:
                 session.close()
         
-        # --- (เดิม) C: ถ้าไม่ใช่ "รายงาน" หรือ "ดู" ให้ Gemini คุย ---
+        # --- C: ถ้าไม่ใช่ "รายงาน" หรือ "ดู" ให้ Gemini คุย ---
         else:
             try:
                 response = chat.send_message(user_text)
@@ -362,4 +362,3 @@ def default(event):
 # --- 8. สั่งให้ "หลังร้าน" (เซิร์ฟเวอร์) เริ่มทำงาน ---
 if __name__ == "__main__":
     app.run(port=5000)
-

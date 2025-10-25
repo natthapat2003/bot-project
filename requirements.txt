@@ -58,3 +58,5 @@ yarl==1.22.0
 SQLAlchemy
 psycopg2-binary
 pytz
+gspread
+google-auth

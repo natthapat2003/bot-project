@@ -13,7 +13,12 @@ from PIL import Image
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, func
 from sqlalchemy.orm import sessionmaker, declarative_base
 import datetime
-import pytz # (เครื่องมือจัดการ Timezone)
+import pytz 
+
+# --- (ใหม่) เพิ่มเครื่องมือ Google Sheet ---
+import gspread
+from google.oauth2.service_account import Credentials
+# --- จบส่วนเครื่องมือ Sheet ---
 
 from linebot.v3 import (
     WebhookHandler
@@ -37,14 +42,19 @@ from linebot.v3.webhooks import (
     TextMessageContent
 )
 
-# --- 1. อ่านกุญแจ 5 ดอกจาก Environment (ที่ซ่อนไว้) ---
+# --- 1. อ่านกุญแจ 5+2 จาก Environment (ที่ซ่อนไว้) ---
 CHANNEL_ACCESS_TOKEN = os.environ.get('CHANNEL_ACCESS_TOKEN')
 CHANNEL_SECRET = os.environ.get('CHANNEL_SECRET')
 PLATE_RECOGNIZER_API_KEY = os.environ.get('PLATE_RECOGNIZER_API_KEY')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 DATABASE_URL = os.environ.get('DATABASE_URL') 
 
-# --- 1.1 ตั้งค่าโซนเวลา (UTC+7) ---
+# --- (ใหม่) 1.1 อ่านค่า Google Sheet ---
+# (เราจะใช้ไฟล์ Secret ที่เราอัปโหลดไปใน Render)
+GSPREAD_KEY_PATH = '/etc/secrets/gspread_key.json' 
+GOOGLE_SHEET_NAME = os.environ.get('GOOGLE_SHEET_NAME')
+
+# --- 1.2 ตั้งค่าโซนเวลา (UTC+7) ---
 TH_TIMEZONE = pytz.timezone('Asia/Bangkok')
 
 # --- 2. ตั้งค่าระบบ ---
@@ -55,10 +65,7 @@ handler = WebhookHandler(CHANNEL_SECRET)
 # --- 2.1 ตั้งค่า "สมอง" Gemini ---
 genai.configure(api_key=GEMINI_API_KEY)
 system_instruction = (
-    "คุณคือ 'testbot' แชทบอทผู้ช่วยอัจฉยะ ที่เชี่ยวชาญการอ่านป้ายทะเบียนรถ"
-    "หน้าที่ของคุณคือพูดคุยทั่วไปด้วยภาษาไทยที่เป็นกันเองและให้ความช่วยเหลือ"
-    "ถ้าผู้ใช้ขอให้อ่านป้ายทะเบียน ให้คุณตอบว่า 'แน่นอนครับ! ส่งรูปภาพหรือวิดีโอเข้ามาได้เลย'"
-    "ถ้าผู้ใช้ถาม 'รายงาน' หรือ 'ดู' (เช่น 'รายงาน 25/10/2025') ให้ตอบกลับด้วยข้อมูลจากระบบ"
+    "คุณคือ 'test' แชทบอทผู้ช่วยอัจฉยะ..." # (บุคลิกบอทของคุณ)
 )
 model = genai.GenerativeModel(
     'models/gemini-flash-latest', 
@@ -70,15 +77,12 @@ chat = model.start_chat(history=[])
 Base = declarative_base()
 engine = None
 SessionLocal = None
-
 class LicensePlateLog(Base):
     __tablename__ = "license_plate_logs"
     id = Column(Integer, primary_key=True, index=True)
     plate = Column(String, index=True)
     province = Column(String)
-    # (เราเก็บใน DB เป็น UTC เสมอ)
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
-
 if DATABASE_URL:
     try:
         if DATABASE_URL.startswith("postgres://"):
@@ -92,26 +96,72 @@ if DATABASE_URL:
 else:
     print("ไม่พบ DATABASE_URL! ระบบบันทึกข้อมูลจะถูกปิดใช้งาน")
 
-# --- (ฟังก์ชันช่วยบันทึก) ---
-def log_plate_to_db(plate_number, province_name):
-    if not SessionLocal: 
-        print("DB logging skipped (no session).")
-        return
-    session = SessionLocal()
+# --- (ใหม่) 2.3 ตั้งค่า "Google Sheet" ---
+gc = None
+if os.path.exists(GSPREAD_KEY_PATH) and GOOGLE_SHEET_NAME:
     try:
-        new_log = LicensePlateLog(plate=plate_number, province=province_name)
-        session.add(new_log)
-        session.commit()
-        print(f"บันทึกลง DB สำเร็จ: {plate_number} - {province_name}")
+        scopes = [
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive.file'
+        ]
+        creds = Credentials.from_service_account_file(GSPREAD_KEY_PATH, scopes=scopes)
+        gc = gspread.authorize(creds)
+        print("Google Sheet (สมุดสำเนา) เชื่อมต่อสำเร็จ!")
     except Exception as e:
-        print(f"บันทึกลง DB ล้มเหลว: {e}")
-        session.rollback()
-    finally:
-        session.close()
+        print(f"Google Sheet เชื่อมต่อล้มเหลว: {e}")
+else:
+    print("ไม่พบ GSPREAD_KEY_PATH หรือ GOOGLE_SHEET_NAME! ระบบ Google Sheet จะถูกปิดใช้งาน")
+
+# --- (ใหม่) ฟังก์ชันช่วยบันทึกลง Sheet ---
+def log_plate_to_sheet(plate_number, province_name, timestamp_th_str):
+    if not gc:
+        print("Google Sheet logging skipped (no connection).")
+        return
+    try:
+        sh = gc.open(GOOGLE_SHEET_NAME)
+        worksheet = sh.get_worksheet(0) # เลือก Sheet แท็บแรก (แท็บ 0)
+        
+        # (เราจะใส่ 'เวลา' ก่อน ตามที่คุณตั้งหัวคอลัมน์ไว้)
+        row_to_add = [timestamp_th_str, plate_number, province_name]
+        worksheet.append_row(row_to_add)
+        print(f"บันทึกลง Google Sheet สำเร็จ: {plate_number}")
+    except Exception as e:
+        print(f"บันทึกลง Google Sheet ล้มเหลว: {e}")
+
+# --- (อัปเกรด) ฟังก์ชันช่วยบันทึก (DB + Sheet) ---
+def log_plate(plate_number, province_name):
+    
+    # (ใหม่) 1. สร้างเวลาก่อน
+    now_th = datetime.datetime.now(TH_TIMEZONE)
+    
+    # 2. บันทึกลง DB (PostgreSQL)
+    if SessionLocal:
+        session = SessionLocal()
+        try:
+            # (เราใช้ 'now_th' ที่เพิ่งสร้าง เพื่อให้เวลาตรงกันทั้ง 2 ที่)
+            # (SQLAlchemy จะแปลงกลับเป็น UTC ให้เองตอนเก็บ)
+            new_log = LicensePlateLog(
+                plate=plate_number, 
+                province=province_name, 
+                timestamp=now_th
+            )
+            session.add(new_log)
+            session.commit()
+            print(f"บันทึกลง DB สำเร็จ: {plate_number}")
+        except Exception as e:
+            print(f"บันทึกลง DB ล้มเหลว: {e}")
+            session.rollback()
+        finally:
+            session.close()
+    
+    # 3. บันทึกลง Sheet (Google Sheet)
+    timestamp_th_str = now_th.strftime('%d/%m/%Y %H:%M:%S') # (รูปแบบเวลาสำหรับ Sheet)
+    log_plate_to_sheet(plate_number, province_name, timestamp_th_str)
 
 # --- 3. สร้าง "ประตู" ชื่อ /callback ---
 @app.route("/callback", methods=['POST'])
 def callback():
+    # ... (โค้ดส่วนนี้เหมือนเดิม) ...
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
     try:
@@ -120,7 +170,7 @@ def callback():
         abort(400)
     return 'OK'
 
-# --- 4. สอนบอท: ถ้าได้รับ "รูปภาพ" ---
+# --- 4. สอนบอท: ถ้าได้รับ "รูปภาพ" (อัปเกรด: ใช้ log_plate) ---
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     with ApiClient(configuration) as api_client:
@@ -133,8 +183,7 @@ def handle_image_message(event):
         try:
             img = Image.open(io.BytesIO(message_content))
             prompt_text = (
-                "นี่คือภาพถ่ายป้ายทะเบียนรถจากประเทศไทย"
-                "หน้าที่ของคุณคือการทำ OCR (Optical Character Recognition) อย่างแม่นยำ"
+                "นี่คือภาพถ่ายป้ายทะเบียนรถจากประเทศไทย..." # (Prompt ของ Gemini)
                 "โปรดอ่าน 'หมวดอักษรและตัวเลข' และ 'จังหวัด' บนป้ายทะเบียนนี้"
                 "และตอบกลับในรูปแบบ:\nเลขทะเบียน: [ที่อ่านได้]\nจังหวัด: [ที่อ่านได้]"
                 "(หากอ่านจังหวัดไม่ชัดเจน ให้ตอบว่า 'ไม่ชัดเจน' หรือ 'ไม่พบจังหวัด')"
@@ -142,12 +191,13 @@ def handle_image_message(event):
             response = model.generate_content([prompt_text, img])
             gemini_response = response.text
             try:
+                # (พยายามดึงข้อมูลจาก Gemini)
                 plate_line = [line for line in gemini_response.split('\n') if "เลขทะเบียน:" in line][0]
                 prov_line = [line for line in gemini_response.split('\n') if "จังหวัด:" in line][0]
                 plate_number = plate_line.split(":")[-1].strip()
                 province = prov_line.split(":")[-1].strip()
                 if plate_number and province not in ["ไม่ชัดเจน", "ไม่พบจังหวัด"]:
-                    log_plate_to_db(plate_number, province) 
+                    log_plate(plate_number, province) # <--- (อัปเกรด) เรียกฟังก์ชันบันทึก
             except Exception as e:
                 print(f"ไม่สามารถแยกข้อมูลจาก Gemini เพื่อ log: {e}")
             reply_text = gemini_response 
@@ -160,7 +210,7 @@ def handle_image_message(event):
             )
         )
 
-# --- 5. สอนบอท: ถ้าได้รับ "วิดีโอ" ---
+# --- 5. สอนบอท: ถ้าได้รับ "วิดีโอ" (อัปเกรด: ใช้ log_plate) ---
 @handler.add(MessageEvent, message=VideoMessageContent)
 def handle_video_message(event):
     with ApiClient(configuration) as api_client:
@@ -210,7 +260,7 @@ def handle_video_message(event):
                         province = result['region']['name']
                     plate_full_name = f"{plate_number} (จ. {province})"
                     if plate_full_name not in found_plates_set:
-                        log_plate_to_db(plate_number, province) 
+                        log_plate(plate_number, province) # <--- (อัปเกรด) เรียกฟังก์ชันบันทึก
                         found_plates_set.add(plate_full_name) 
             cap.release()
             
@@ -234,7 +284,7 @@ def handle_video_message(event):
         finally:
             if os.path.exists(video_path): os.remove(video_path)
 
-# --- 6. สอนบอท: ถ้าได้รับ "ข้อความ" (อัปเกรด: "รายงาน" + "ดูข้อมูล" + "เวลา" ⏰) ---
+# --- 6. สอนบอท: ถ้าได้รับ "ข้อความ" (รายงาน + ดูข้อมูล + เวลา ⏰) ---
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
     user_text = event.message.text.strip()
@@ -299,27 +349,22 @@ def handle_text_message(event):
                         start_th_aware = TH_TIMEZONE.localize(naive_date)
                         start_utc = start_th_aware.astimezone(pytz.utc)
                         end_utc = start_utc + datetime.timedelta(days=1)
-
-                        # (❗ แก้ไข Query: ดึง timestamp มาด้วย)
+                        
                         logs = session.query(
                             LicensePlateLog.plate, 
                             LicensePlateLog.province, 
-                            LicensePlateLog.timestamp # <--- ดึงเวลา (UTC) มา
+                            LicensePlateLog.timestamp
                         ).filter(
                             LicensePlateLog.timestamp >= start_utc,
                             LicensePlateLog.timestamp < end_utc
-                        ).order_by(LicensePlateLog.timestamp).limit(30).all() # (เรียงตามเวลา)
+                        ).order_by(LicensePlateLog.timestamp).limit(30).all()
                         
                         if not logs:
                             reply_text = f"ไม่พบข้อมูลป้ายทะเบียนในวันที่ {date_str} ครับ"
                         else:
                             reply_text = f"📋 ข้อมูลป้ายทะเบียน วันที่ {date_str}:\n(แสดง 30 รายการแรก)\n\n"
-                            
-                            # (❗ แก้ไข Loop: เพิ่มการแสดงเวลา)
                             for i, (plate, province, timestamp_utc) in enumerate(logs):
-                                # แปลงเวลา UTC กลับเป็นไทย
                                 timestamp_th = timestamp_utc.astimezone(TH_TIMEZONE)
-                                # จัดรูปแบบ "HH:MM น."
                                 time_str = timestamp_th.strftime('%H:%M น.') 
                                 reply_text += f"* เวลา {time_str}: {plate} (จ. {province})\n"
                     except ValueError:

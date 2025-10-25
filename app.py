@@ -1,13 +1,19 @@
 import os
 import requests
-import cv2              # สำหรับวิดีโอ
-import tempfile         # สำหรับไฟล์ชั่วคราว
+import cv2
+import tempfile
 from flask import Flask, request, abort
 
-import google.generativeai as genai # สำหรับ "สมอง" Gemini
+import google.generativeai as genai 
 
-import io                     # สำหรับจัดการ I/O ของภาพ
-from PIL import Image         # สำหรับจัดการภาพ (จาก Pillow)
+import io
+from PIL import Image
+
+# --- (ใหม่) เพิ่มเครื่องมือฐานข้อมูล ---
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, func
+from sqlalchemy.orm import sessionmaker, declarative_base
+import datetime
+# --- จบส่วนเครื่องมือฐานข้อมูล ---
 
 from linebot.v3 import (
     WebhookHandler
@@ -22,20 +28,21 @@ from linebot.v3.messaging import (
     MessagingApiBlob,
     ReplyMessageRequest,
     TextMessage,
-    PushMessageRequest  # <--- (แก้บั๊ก Push Message แล้ว)
+    PushMessageRequest
 )
 from linebot.v3.webhooks import (
     MessageEvent,
-    ImageMessageContent,  # ดักจับ "ภาพ"
-    VideoMessageContent,  # ดักจับ "วิดีโอ"
-    TextMessageContent    # ดักจับ "ข้อความ"
+    ImageMessageContent,
+    VideoMessageContent,
+    TextMessageContent
 )
 
-# --- 1. อ่านกุญแจ 4 ดอก จาก Environment (วิธีที่ถูกต้อง) ---
+# --- 1. อ่านกุญแจ 5 ดอกจาก Environment (ที่ซ่อนไว้) ---
 CHANNEL_ACCESS_TOKEN = os.environ.get('CHANNEL_ACCESS_TOKEN')
 CHANNEL_SECRET = os.environ.get('CHANNEL_SECRET')
 PLATE_RECOGNIZER_API_KEY = os.environ.get('PLATE_RECOGNIZER_API_KEY')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+DATABASE_URL = os.environ.get('DATABASE_URL') # <--- (ใหม่) กุญแจดอกที่ 5
 
 # --- 2. ตั้งค่าระบบ ---
 app = Flask(__name__)
@@ -44,18 +51,62 @@ handler = WebhookHandler(CHANNEL_SECRET)
 
 # --- 2.1 ตั้งค่า "สมอง" Gemini ---
 genai.configure(api_key=GEMINI_API_KEY)
-
 system_instruction = (
-    "คุณคือ 'C1TOY' แชทบอทผู้ช่วยอัจฉริยะ ที่เชี่ยวชาญการอ่านป้ายทะเบียนรถ"
+    "คุณคือ 'Bankบอท' แชทบอทผู้ช่วยอัจฉริยะ ที่เชี่ยวชาญการอ่านป้ายทะเบียนรถ"
     "หน้าที่ของคุณคือพูดคุยทั่วไปด้วยภาษาไทยที่เป็นกันเองและให้ความช่วยเหลือ"
     "ถ้าผู้ใช้ขอให้อ่านป้ายทะเบียน ให้คุณตอบว่า 'แน่นอนครับ! ส่งรูปภาพหรือวิดีโอเข้ามาได้เลย'"
-    "ถ้าผู้ใช้ส่งรูปหรือวิดีโอมา คุณจะถูกเรียกใช้ฟังก์ชันอื่นเพื่อประมวลผล (คุณไม่ต้องตอบเรื่องรูป)"
+    "ถ้าผู้ใช้ถาม 'รายงาน' หรือ 'กี่ป้าย' ให้ตอบกลับด้วยข้อมูลจากระบบ"
 )
 model = genai.GenerativeModel(
     'models/gemini-flash-latest', 
     system_instruction=system_instruction
 )
 chat = model.start_chat(history=[])
+
+# --- (ใหม่) 2.2 ตั้งค่า "สมุดบันทึก" (Database) ---
+Base = declarative_base()
+engine = None
+SessionLocal = None
+
+class LicensePlateLog(Base):
+    __tablename__ = "license_plate_logs"
+    id = Column(Integer, primary_key=True, index=True)
+    plate = Column(String, index=True)
+    province = Column(String)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+
+if DATABASE_URL:
+    try:
+        # (Render ใช้ 'postgres://' แต่ SQLAlchemy ชอบ 'postgresql://')
+        if DATABASE_URL.startswith("postgres://"):
+            DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+            
+        engine = create_engine(DATABASE_URL)
+        Base.metadata.create_all(bind=engine) # สร้างตารางอัตโนมัติ (ถ้ายังไม่มี)
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        print("Database (สมุดบันทึก) เชื่อมต่อสำเร็จ!")
+    except Exception as e:
+        print(f"Database (สมุดบันทึก) เชื่อมต่อล้มเหลว: {e}")
+else:
+    print("ไม่พบ DATABASE_URL! ระบบบันทึกข้อมูลจะถูกปิดใช้งาน")
+
+# --- (ใหม่) ฟังก์ชันช่วยบันทึก (Helper Function) ---
+def log_plate_to_db(plate_number, province_name):
+    if not SessionLocal: # ถ้าฐานข้อมูลเชื่อมต่อไม่สำเร็จ
+        print("DB logging skipped (no session).")
+        return
+
+    session = SessionLocal()
+    try:
+        new_log = LicensePlateLog(plate=plate_number, province=province_name)
+        session.add(new_log)
+        session.commit()
+        print(f"บันทึกลง DB สำเร็จ: {plate_number} - {province_name}")
+    except Exception as e:
+        print(f"บันทึกลง DB ล้มเหลว: {e}")
+        session.rollback()
+    finally:
+        session.close()
 
 # --- 3. สร้าง "ประตู" ชื่อ /callback ---
 @app.route("/callback", methods=['POST'])
@@ -68,7 +119,7 @@ def callback():
         abort(400)
     return 'OK'
 
-# --- 4. สอนบอท: ถ้าได้รับ "รูปภาพ" (ใช้ Gemini อ่าน 🧠👁️) ---
+# --- 4. สอนบอท: ถ้าได้รับ "รูปภาพ" (อัปเกรด: บันทึกลง DB) ---
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     with ApiClient(configuration) as api_client:
@@ -85,12 +136,29 @@ def handle_image_message(event):
                 "หน้าที่ของคุณคือการทำ OCR (Optical Character Recognition) อย่างแม่นยำ"
                 "โปรดอ่าน 'หมวดอักษรและตัวเลข' และ 'จังหวัด' บนป้ายทะเบียนนี้"
                 "และตอบกลับในรูปแบบ:\nเลขทะเบียน: [ที่อ่านได้]\nจังหวัด: [ที่อ่านได้]"
-                "(หากอ่านจังหวัดไม่ชัดเจน ให้ตอบว่า 'ไม่ชัดเจน')"
+                "(หากอ่านจังหวัดไม่ชัดเจน ให้ตอบว่า 'ไม่ชัดเจน' หรือ 'ไม่พบจังหวัด')"
             )
             response = model.generate_content([prompt_text, img])
-            reply_text = response.text
+            gemini_response = response.text
+            
+            # (พยายามดึงข้อมูลจากที่ Gemini อ่าน เพื่อบันทึก)
+            try:
+                plate_line = [line for line in gemini_response.split('\n') if "เลขทะเบียน:" in line][0]
+                prov_line = [line for line in gemini_response.split('\n') if "จังหวัด:" in line][0]
+                
+                plate_number = plate_line.split(":")[-1].strip()
+                province = prov_line.split(":")[-1].strip()
+
+                if plate_number and province not in ["ไม่ชัดเจน", "ไม่พบจังหวัด"]:
+                    log_plate_to_db(plate_number, province) # <--- (ใหม่) บันทึกลง DB
+            except Exception as e:
+                print(f"ไม่สามารถแยกข้อมูลจาก Gemini เพื่อ log: {e}")
+            
+            reply_text = gemini_response # ตอบกลับด้วยสิ่งที่ Gemini อ่านได้
+            
         except Exception as e:
             reply_text = f"เกิดข้อผิดพลาด (Gemini Vision): {e}"
+            
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
@@ -98,7 +166,7 @@ def handle_image_message(event):
             )
         )
 
-# --- 5. สอนบอท: ถ้าได้รับ "วิดีโอ" (อัปเกรดป้ายไทย + แก้บั๊ก Push) ---
+# --- 5. สอนบอท: ถ้าได้รับ "วิดีโอ" (อัปเกรด: บันทึกลง DB) ---
 @handler.add(MessageEvent, message=VideoMessageContent)
 def handle_video_message(event):
     with ApiClient(configuration) as api_client:
@@ -106,7 +174,6 @@ def handle_video_message(event):
         line_bot_blob_api = MessagingApiBlob(api_client)
         user_id = event.source.user_id 
         
-        # (A) ตอบกลับทันที
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
@@ -114,7 +181,6 @@ def handle_video_message(event):
             )
         )
 
-        # (B) ประมวลผลเบื้องหลัง
         video_content = line_bot_blob_api.get_message_content(
             message_id=event.message.id
         )
@@ -124,7 +190,8 @@ def handle_video_message(event):
                 temp_video.write(video_content)
                 video_path = temp_video.name
             cap = cv2.VideoCapture(video_path)
-            found_plates = set() 
+            found_plates_set = set() # (สำหรับกันป้ายซ้ำ)
+            
             frame_count = 0
             while cap.isOpened():
                 ret, frame = cap.read()
@@ -140,9 +207,7 @@ def handle_video_message(event):
                 data = {'region': 'th'} 
                 response = requests.post(
                     'https://api.platerecognizer.com/v1/plate-reader/',
-                    files=files,
-                    headers=headers,
-                    data=data 
+                    files=files, headers=headers, data=data 
                 )
                 ai_data = response.json()
                 if ai_data.get('results') and len(ai_data['results']) > 0:
@@ -151,16 +216,18 @@ def handle_video_message(event):
                     province = "(ไม่พบจังหวัด)"
                     if result.get('region') and result['region'].get('name') and result['region']['name'] != 'Thailand':
                         province = result['region']['name']
-                    found_plates.add(f"{plate_number} (จ. {province})") 
+                    
+                    plate_full_name = f"{plate_number} (จ. {province})"
+                    if plate_full_name not in found_plates_set:
+                        log_plate_to_db(plate_number, province) # <--- (ใหม่) บันทึกลง DB
+                        found_plates_set.add(plate_full_name) 
             cap.release()
             
-            # (C) ส่ง Push Message กลับไป
-            if len(found_plates) > 0:
-                final_text = f"ผลการประมวลผลวิดีโอ:\n" + "\n".join(found_plates)
+            if len(found_plates_set) > 0:
+                final_text = f"ผลการประมวลผลวิดีโอ:\n" + "\n".join(found_plates_set)
             else:
                 final_text = "ผลการประมวลผลวิดีโอ:\nไม่พบป้ายทะเบียนครับ"
 
-            # (แก้บั๊กจุดที่ 1)
             line_bot_api.push_message( 
                 PushMessageRequest( 
                     to=user_id,
@@ -168,7 +235,6 @@ def handle_video_message(event):
                 )
             )
         except Exception as e:
-            # (แก้บั๊กจุดที่ 2)
             line_bot_api.push_message(
                 PushMessageRequest(
                     to=user_id,
@@ -178,17 +244,51 @@ def handle_video_message(event):
         finally:
             if os.path.exists(video_path): os.remove(video_path)
 
-# --- 6. สอนบอท: ถ้าได้รับ "ข้อความ" (สมอง Gemini ตอบ) ---
+# --- 6. สอนบอท: ถ้าได้รับ "ข้อความ" (อัปเกรด: เพิ่ม "รายงาน") ---
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
     user_text = event.message.text 
+    
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
-        try:
-            response = chat.send_message(user_text)
-            gemini_reply = response.text 
-        except Exception as e:
-            gemini_reply = f"ขออภัยครับ สมองผมกำลังมีปัญหา: {e}"
+        gemini_reply = ""
+        
+        # --- (ใหม่) ตรวจจับคำสั่ง "รายงาน" ---
+        if "รายงาน" in user_text or "กี่ป้าย" in user_text:
+            if not SessionLocal:
+                gemini_reply = "ขออภัยครับ ระบบฐานข้อมูล (สมุดบันทึก) มีปัญหา ไม่สามารถดูรายงานได้"
+            else:
+                session = SessionLocal()
+                try:
+                    # (เราจะนับ "วันนี้" โดยอิงตามเวลาสากล (UTC) ของเซิร์ฟเวอร์ก่อนนะครับ)
+                    today_start_utc = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                    
+                    # 1. นับยอด "วันนี้" (ตามเวลา UTC)
+                    count_today = session.query(func.count(LicensePlateLog.id)).filter(
+                        LicensePlateLog.timestamp >= today_start_utc
+                    ).scalar()
+
+                    # 2. นับยอด "ทั้งหมด"
+                    count_all = session.query(func.count(LicensePlateLog.id)).scalar()
+                    
+                    gemini_reply = f"📊 รายงานสรุป 'Bankบอท' (UTC):\n\n"
+                    gemini_reply += f"วันนี้บันทึกไปแล้ว: {count_today} ป้าย\n"
+                    gemini_reply += f"ยอดรวมทั้งหมด: {count_all} ป้าย"
+                    
+                except Exception as e:
+                    gemini_reply = f"ขออภัยครับ ดึงรายงานไม่สำเร็จ: {e}"
+                finally:
+                    session.close()
+        
+        # --- (เดิม) ถ้าไม่ใช่รายงาน ให้ Gemini คุย ---
+        else:
+            try:
+                response = chat.send_message(user_text)
+                gemini_reply = response.text 
+            except Exception as e:
+                gemini_reply = f"ขออภัยครับ สมองผมกำลังมีปัญหา: {e}"
+
+        # ตอบกลับผู้ใช้
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
@@ -210,5 +310,4 @@ def default(event):
 
 # --- 8. สั่งให้ "หลังร้าน" (เซิร์ฟเวอร์) เริ่มทำงาน ---
 if __name__ == "__main__":
-
     app.run(port=5000)

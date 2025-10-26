@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import cv2
 import tempfile
@@ -12,26 +13,17 @@ import pytz
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
-    Configuration,
-    ApiClient,
-    MessagingApi,
-    MessagingApiBlob,
-    ReplyMessageRequest,
-    TextMessage,
-    PushMessageRequest
+    Configuration, ApiClient, MessagingApi, MessagingApiBlob,
+    ReplyMessageRequest, TextMessage, PushMessageRequest
 )
 from linebot.v3.webhooks import (
-    MessageEvent,
-    ImageMessageContent,
-    VideoMessageContent,
-    TextMessageContent
+    MessageEvent, ImageMessageContent, VideoMessageContent, TextMessageContent
 )
 
 CHANNEL_ACCESS_TOKEN = os.environ.get('CHANNEL_ACCESS_TOKEN')
 CHANNEL_SECRET = os.environ.get('CHANNEL_SECRET')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 DATABASE_URL = os.environ.get('DATABASE_URL')
-
 TH_TIMEZONE = pytz.timezone('Asia/Bangkok')
 
 app = Flask(__name__)
@@ -40,10 +32,9 @@ handler = WebhookHandler(CHANNEL_SECRET)
 
 genai.configure(api_key=GEMINI_API_KEY)
 system_instruction = (
-    "คุณคือ 'test' แชทบอทผู้ช่วยอัจฉยะ ที่เชี่ยวชาญการอ่านป้ายทะเบียนรถ"
-    "หน้าที่ของคุณคือพูดคุยทั่วไปด้วยภาษาไทยที่เป็นกันเองและให้ความช่วยเหลือ"
-    "ถ้าผู้ใช้ขอให้อ่านป้ายทะเบียน ให้คุณตอบว่า 'แน่นอนครับ! ส่งรูปภาพหรือวิดีโอเข้ามาได้เลย'"
-    "ถ้าผู้ใช้ถาม 'รายงาน' หรือ 'ดู' (เช่น 'รายงาน 25/10/2025') ให้ตอบกลับด้วยข้อมูลจากระบบ"
+    "คุณคือ 'test' แชทบอทผู้ช่วยอัจฉยะ ที่เชี่ยวชาญการอ่านป้ายทะเบียนรถไทย"
+    "หน้าที่คือคุยทั่วไป ถ้าผู้ใช้ขอให้อ่านป้าย ให้ตอบว่า 'ส่งรูปภาพหรือวิดีโอมาได้เลย'"
+    "ถ้าผู้ใช้ถาม 'รายงาน' หรือ 'ดู' ให้ตอบกลับข้อมูลจากระบบ"
 )
 gemini_vision_model = None
 gemini_chat_model = None
@@ -51,38 +42,33 @@ gemini_chat = None
 try:
     gemini_vision_model = genai.GenerativeModel('models/gemini-flash-latest')
     gemini_chat_model = genai.GenerativeModel(
-        'models/gemini-flash-latest',
-        system_instruction=system_instruction
+        'models/gemini-flash-latest', system_instruction=system_instruction
     )
     gemini_chat = gemini_chat_model.start_chat(history=[])
-    print("Gemini (สมอง) เชื่อมต่อสำเร็จ!")
+    print("Gemini initialized.")
 except Exception as e:
-    print(f"Gemini (สมอง) เชื่อมต่อล้มเหลว: {e}")
+    print(f"Gemini init failed: {e}")
 
 Base = declarative_base()
 engine = None
 SessionLocal = None
-
 class LicensePlateLog(Base):
     __tablename__ = "license_plate_logs"
     id = Column(Integer, primary_key=True, index=True)
     plate = Column(String, index=True)
     province = Column(String)
     timestamp = Column(DateTime(timezone=True), server_default=func.now()) # UTC
-
 if DATABASE_URL:
     try:
-        db_url_corrected = DATABASE_URL
-        if db_url_corrected.startswith("postgres://"):
-            db_url_corrected = db_url_corrected.replace("postgres://", "postgresql://", 1)
+        db_url_corrected = DATABASE_URL.replace("postgres://", "postgresql://", 1) if DATABASE_URL.startswith("postgres://") else DATABASE_URL
         engine = create_engine(db_url_corrected)
         Base.metadata.create_all(bind=engine)
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        print("Database (สมุดบันทึก) เชื่อมต่อสำเร็จ!")
+        print("Database connected.")
     except Exception as e:
-        print(f"Database (สมุดบันทึก) เชื่อมต่อล้มเหลว: {e}")
+        print(f"Database connection failed: {e}")
 else:
-    print("ไม่พบ DATABASE_URL! ระบบบันทึกข้อมูล (DB) จะถูกปิดใช้งาน")
+    print("DATABASE_URL not found, DB logging disabled.")
 
 def log_plate(plate_number, province_name):
     now_th = datetime.datetime.now(TH_TIMEZONE)
@@ -92,9 +78,9 @@ def log_plate(plate_number, province_name):
             new_log = LicensePlateLog(plate=plate_number, province=province_name, timestamp=now_th)
             session.add(new_log)
             session.commit()
-            print(f"บันทึกลง DB สำเร็จ: {plate_number}")
+            print(f"Logged to DB: {plate_number}")
         except Exception as e:
-            print(f"บันทึกลง DB ล้มเหลว: {e}")
+            print(f"DB log failed: {e}")
             session.rollback()
         finally:
             session.close()
@@ -109,7 +95,7 @@ def callback():
         print("Invalid signature.")
         abort(400)
     except Exception as e:
-        print(f"Error in callback: {e}")
+        print(f"Callback error: {e}")
         abort(500)
     return 'OK'
 
@@ -119,16 +105,15 @@ def handle_image_message(event):
         line_bot_api = MessagingApi(api_client)
         line_bot_blob_api = MessagingApiBlob(api_client)
         message_content = line_bot_blob_api.get_message_content(message_id=event.message.id)
-        ocr_result_text = "ขออภัยครับ ไม่สามารถอ่านภาพได้"
+        ocr_result_text = "ขออภัย อ่านภาพไม่ได้"
         explanation_text = ""
         try:
-            if not gemini_vision_model: raise Exception("Gemini Vision model not initialized.")
+            if not gemini_vision_model: raise Exception("Gemini Vision not ready.")
             img = Image.open(io.BytesIO(message_content))
             prompt_ocr = (
-                "นี่คือภาพถ่ายป้ายทะเบียนรถจากประเทศไทย..."
-                "โปรดอ่าน 'หมวดอักษรและตัวเลข' และ 'จังหวัด' บนป้ายทะเบียนนี้"
-                "และตอบกลับในรูปแบบ:\nเลขทะเบียน: [ที่อ่านได้]\nจังหวัด: [ที่อ่านได้]"
-                "(หากอ่านจังหวัดไม่ชัดเจน ให้ตอบว่า 'ไม่ชัดเจน' หรือ 'ไม่พบจังหวัด')"
+                "อ่านป้ายทะเบียนรถไทยในภาพนี้"
+                "ตอบรูปแบบ:\nเลขทะเบียน: [ที่อ่านได้]\nจังหวัด: [ที่อ่านได้]"
+                "(ถ้าไม่ชัดเจน ตอบ 'ไม่ชัดเจน')"
             )
             response_ocr = gemini_vision_model.generate_content([prompt_ocr, img])
             ocr_result_text = response_ocr.text
@@ -138,22 +123,27 @@ def handle_image_message(event):
                 if plate_line and prov_line:
                     plate_number_for_log = plate_line.split(":")[-1].strip()
                     province_for_log = prov_line.split(":")[-1].strip()
-                    if plate_number_for_log and province_for_log not in ["ไม่ชัดเจน", "ไม่พบจังหวัด", ""]:
+                    if plate_number_for_log and province_for_log not in ["ไม่ชัดเจน", ""]:
                         log_plate(plate_number_for_log, province_for_log)
                         if gemini_chat:
                             try:
-                                prompt_explain = f"อธิบายความหมาย ประเภท และลักษณะ (เช่น สีพื้นหลัง สีตัวอักษร) ของป้ายทะเบียนไทย '{plate_number_for_log}' จากจังหวัด '{province_for_log}' ให้หน่อยครับ"
+                                # *** เพิ่มคำสั่งให้แยกประเภทรถ ***
+                                prompt_explain = (
+                                    f"ป้ายทะเบียนไทย '{plate_number_for_log}' จังหวัด '{province_for_log}' "
+                                    f"เป็นป้ายประเภทใด (เช่น รถยนต์ส่วนบุคคล, รถจักรยานยนต์) "
+                                    f"และมีความหมาย/ลักษณะอย่างไร (สีพื้นหลัง, สีตัวอักษร)?"
+                                )
                                 response_explain = gemini_chat.send_message(prompt_explain)
-                                explanation_text = "\n\n--- ความหมาย ---\n" + response_explain.text
+                                explanation_text = "\n\n--- ข้อมูลป้าย ---\n" + response_explain.text # ใช้ชื่อ section ใหม่
                             except Exception as explain_e:
-                                print(f"Gemini ไม่สามารถอธิบายป้าย: {explain_e}")
-                                explanation_text = "\n\n(ขออภัย ไม่สามารถดึงข้อมูลความหมายได้)"
+                                print(f"Gemini explanation failed: {explain_e}")
+                                explanation_text = "\n\n(ไม่สามารถดึงข้อมูลป้ายได้)"
                         else:
-                             explanation_text = "\n\n(ขออภัย ไม่สามารถเชื่อมต่อ Gemini เพื่อขอความหมายได้)"
+                             explanation_text = "\n\n(Gemini chat not ready for explanation)"
             except Exception as log_e:
-                print(f"ไม่สามารถแยกข้อมูลจาก Gemini OCR เพื่อ log/explain: {log_e}")
+                print(f"OCR parsing/logging failed: {log_e}")
         except Exception as e:
-            print(f"Error in handle_image_message (Gemini Vision): {e}")
+            print(f"Image handling error: {e}")
             ocr_result_text = f"เกิดข้อผิดพลาดในการอ่านภาพ: {e}"
         final_reply_text = ocr_result_text + explanation_text
         line_bot_api.reply_message_with_http_info(
@@ -167,32 +157,29 @@ def handle_video_message(event):
         line_bot_blob_api = MessagingApiBlob(api_client)
         user_id = event.source.user_id
         line_bot_api.reply_message_with_http_info(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text='ได้รับวิดีโอแล้ว กำลังประมวลผล (Gemini Vision)... ⏳')]
-            )
+            ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text='รับวิดีโอแล้ว กำลังประมวลผล (Gemini Vision)... ⏳')])
         )
         video_content = line_bot_blob_api.get_message_content(message_id=event.message.id)
         video_path = ""
         try:
-            if not gemini_vision_model: raise Exception("Gemini Vision model not initialized.")
+            if not gemini_vision_model: raise Exception("Gemini Vision not ready.")
             with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_video:
                 temp_video.write(video_content)
                 video_path = temp_video.name
             cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened(): raise Exception("ไม่สามารถเปิดไฟล์วิดีโอได้")
+            if not cap.isOpened(): raise Exception("Cannot open video file.")
             found_plates_set = set()
             frame_count = 0
             prompt_text_frame = (
-                "นี่คือภาพเฟรมจากวิดีโอป้ายทะเบียนรถในประเทศไทย..."
-                "ตอบกลับเฉพาะตัวอักษรและตัวเลขของป้ายทะเบียนและจังหวัดเท่านั้น ในรูปแบบ: [เลขทะเบียน],[จังหวัด]"
-                "(ถ้าไม่พบ หรืออ่านไม่ชัดเจน ให้ตอบว่า 'ไม่พบ')"
+                "อ่านป้ายทะเบียนรถไทยในภาพเฟรมนี้"
+                "ตอบรูปแบบ: [เลขทะเบียน],[จังหวัด]"
+                "(ถ้าไม่พบ ตอบ 'ไม่พบ')"
             )
             while True:
                 ret, frame = cap.read()
                 if not ret: break
                 frame_count += 1
-                if frame_count % 60 != 0: continue # อ่าน 1 เฟรม ทุก 2 วินาที
+                if frame_count % 60 != 0: continue
                 try:
                     is_success, buffer = cv2.imencode(".jpg", frame)
                     if not is_success: continue
@@ -203,36 +190,28 @@ def handle_video_message(event):
                     if gemini_text_result != "ไม่พบ" and "," in gemini_text_result:
                         parts = gemini_text_result.split(',', 1)
                         if len(parts) == 2:
-                            plate_number = parts[0].strip()
-                            province = parts[1].strip()
+                            plate_number, province = parts[0].strip(), parts[1].strip()
                             if plate_number and province:
                                 plate_full_name = f"{plate_number} (จ. {province})"
                                 if plate_full_name not in found_plates_set:
                                     log_plate(plate_number, province)
                                     found_plates_set.add(plate_full_name)
                 except Exception as frame_e:
-                    print(f"Gemini ไม่สามารถอ่านเฟรมที่ {frame_count}: {frame_e}")
+                    print(f"Gemini frame read failed (frame {frame_count}): {frame_e}")
             cap.release()
-            if len(found_plates_set) > 0:
-                final_text = f"ผลการประมวลผลวิดีโอ (Gemini):\n" + "\n".join(list(found_plates_set)[:10])
+            if found_plates_set:
+                final_text = f"ผลประมวลผลวิดีโอ (Gemini):\n" + "\n".join(list(found_plates_set)[:10])
                 if len(found_plates_set) > 10: final_text += "\n(และอื่นๆ...)"
             else:
-                final_text = "ผลการประมวลผลวิดีโอ (Gemini):\nไม่พบป้ายทะเบียนครับ"
-            line_bot_api.push_message(
-                PushMessageRequest(to=user_id, messages=[TextMessage(text=final_text)])
-            )
+                final_text = "ผลประมวลผลวิดีโอ (Gemini):\nไม่พบป้ายทะเบียน"
+            line_bot_api.push_message(PushMessageRequest(to=user_id, messages=[TextMessage(text=final_text)]))
         except Exception as e:
-            print(f"Error in handle_video_message (Gemini): {e}")
-            line_bot_api.push_message(
-                PushMessageRequest(
-                    to=user_id,
-                    messages=[TextMessage(text=f"เกิดข้อผิดพลาดระหว่างประมวลผลวิดีโอ (Gemini): {e}")]
-                )
-            )
+            print(f"Video handling error: {e}")
+            line_bot_api.push_message(PushMessageRequest(to=user_id, messages=[TextMessage(text=f"ประมวลผลวิดีโอผิดพลาด: {e}")]))
         finally:
             if os.path.exists(video_path):
                 try: os.remove(video_path)
-                except Exception as remove_e: print(f"ไม่สามารถลบไฟล์วิดีโอชั่วคราวได้: {remove_e}")
+                except Exception as remove_e: print(f"Cannot remove temp video: {remove_e}")
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
@@ -241,7 +220,7 @@ def handle_text_message(event):
         line_bot_api = MessagingApi(api_client)
         reply_text = ""
         if not SessionLocal:
-             reply_text = "ขออภัยครับ ระบบฐานข้อมูล (สมุดบันทึก) มีปัญหา"
+             reply_text = "ขออภัย ระบบฐานข้อมูลมีปัญหา"
         elif user_text.startswith("รายงาน"):
             session = SessionLocal()
             try:
@@ -256,9 +235,9 @@ def handle_text_message(event):
                         count = session.query(func.count(LicensePlateLog.id)).filter(
                             LicensePlateLog.timestamp >= start_utc, LicensePlateLog.timestamp < end_utc
                         ).scalar()
-                        reply_text = f"📊 รายงานยอดวันที่ {date_str} (เวลาไทย):\nบันทึกไปทั้งหมด: {count} ป้าย"
+                        reply_text = f"📊 รายงานยอดวันที่ {date_str} (ไทย):\nบันทึกไป: {count} ป้าย"
                     except ValueError:
-                        reply_text = "รูปแบบวันที่ไม่ถูกต้อง 😅\nกรุณาใช้ 'รายงาน DD/MM/YYYY'"
+                        reply_text = "รูปแบบวันที่ผิด 😅 (ใช้ DD/MM/YYYY)"
                 elif len(parts) == 1:
                     now_th = datetime.datetime.now(TH_TIMEZONE)
                     today_start_th_aware = now_th.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -267,14 +246,12 @@ def handle_text_message(event):
                         LicensePlateLog.timestamp >= today_start_utc
                     ).scalar()
                     count_all = session.query(func.count(LicensePlateLog.id)).scalar()
-                    reply_text = f"📊 รายงานสรุป 'Bankบอท' (เวลาไทย):\n\n"
-                    reply_text += f"วันนี้บันทึกไปแล้ว: {count_today} ป้าย\n"
-                    reply_text += f"ยอดรวมทั้งหมด: {count_all} ป้าย"
+                    reply_text = f"📊 รายงานสรุป (ไทย):\nวันนี้: {count_today} ป้าย\nรวมทั้งหมด: {count_all} ป้าย"
                 else:
-                    reply_text = "ไม่เข้าใจคำสั่งรายงานครับ 😅"
+                    reply_text = "ไม่เข้าใจคำสั่งรายงาน 😅"
             except Exception as e:
-                print(f"Error during report generation: {e}")
-                reply_text = f"ขออภัยครับ ดึงรายงานไม่สำเร็จ: {e}"
+                print(f"Report generation error: {e}")
+                reply_text = f"ดึงรายงานไม่สำเร็จ: {e}"
             finally:
                 session.close()
         elif user_text.startswith("ดู "):
@@ -294,32 +271,32 @@ def handle_text_message(event):
                             LicensePlateLog.timestamp >= start_utc, LicensePlateLog.timestamp < end_utc
                         ).order_by(LicensePlateLog.timestamp).limit(30).all()
                         if not logs:
-                            reply_text = f"ไม่พบข้อมูลป้ายทะเบียนในวันที่ {date_str} ครับ"
+                            reply_text = f"ไม่พบข้อมูลวันที่ {date_str}"
                         else:
-                            reply_text = f"📋 ข้อมูลป้ายทะเบียน วันที่ {date_str}:\n(แสดง 30 รายการแรก)\n\n"
+                            reply_text = f"📋 ข้อมูลวันที่ {date_str} (30 รายการแรก):\n\n"
                             for i, (plate, province, timestamp_utc) in enumerate(logs):
                                 timestamp_th = timestamp_utc.astimezone(TH_TIMEZONE)
                                 time_str = timestamp_th.strftime('%H:%M น.')
-                                reply_text += f"* เวลา {time_str}: {plate} (จ. {province})\n"
+                                reply_text += f"* {time_str}: {plate} (จ. {province})\n"
                     except ValueError:
-                        reply_text = "รูปแบบวันที่ไม่ถูกต้อง 😅\nกรุณาใช้ 'ดู DD/MM/YYYY'"
+                        reply_text = "รูปแบบวันที่ผิด 😅 (ใช้ DD/MM/YYYY)"
                 else:
-                    reply_text = "คำสั่ง 'ดู' ต้องตามด้วยวันที่ครับ\n(เช่น: 'ดู 25/10/2025')"
+                    reply_text = "คำสั่ง 'ดู' ต้องตามด้วยวันที่ (เช่น 'ดู 25/10/2025')"
             except Exception as e:
-                print(f"Error during data viewing: {e}")
-                reply_text = f"ขออภัยครับ ดึงข้อมูลไม่สำเร็จ: {e}"
+                print(f"Data viewing error: {e}")
+                reply_text = f"ดึงข้อมูลไม่สำเร็จ: {e}"
             finally:
                 session.close()
         else:
             if not gemini_chat:
-                reply_text = "ขออภัยครับ สมองผม (Gemini) ยังไม่พร้อมใช้งาน"
+                reply_text = "ขออภัย สมองผม (Gemini) ยังไม่พร้อม"
             else:
                 try:
                     response = gemini_chat.send_message(user_text)
                     reply_text = response.text
                 except Exception as e:
-                    print(f"Error calling Gemini chat: {e}")
-                    reply_text = f"ขออภัยครับ สมองผมกำลังมีปัญหา: {e}"
+                    print(f"Gemini chat error: {e}")
+                    reply_text = f"ขออภัย สมองผมมีปัญหา: {e}"
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)])
         )
@@ -331,7 +308,7 @@ def default(event):
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text='ผมไม่เข้าใจสิ่งที่คุณส่งมาครับ กรุณาส่ง "ข้อความ", "รูปภาพ", หรือ "วิดีโอ" เท่านั้นครับ 😅')]
+                messages=[TextMessage(text='ไม่เข้าใจครับ กรุณาส่ง ข้อความ, รูปภาพ, หรือ วิดีโอ เท่านั้น 😅')]
             )
         )
 

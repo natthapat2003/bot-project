@@ -1,32 +1,16 @@
-# -*- coding: utf-8 -*-
 import os
-# import requests # <--- ลบออก
 import cv2
 import tempfile
 from flask import Flask, request, abort
-
 import google.generativeai as genai
-
 import io
 from PIL import Image
-
-# (เครื่องมือฐานข้อมูล)
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, func
 from sqlalchemy.orm import sessionmaker, declarative_base
 import datetime
 import pytz
-
-# (เครื่องมือ Google Sheet)
-import gspread
-from google.oauth2.service_account import Credentials
-
-# (เครื่องมือ LINE Bot)
-from linebot.v3 import (
-    WebhookHandler
-)
-from linebot.v3.exceptions import (
-    InvalidSignatureError
-)
+from linebot.v3 import WebhookHandler
+from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
     Configuration,
     ApiClient,
@@ -43,50 +27,49 @@ from linebot.v3.webhooks import (
     TextMessageContent
 )
 
-# --- 1. อ่านกุญแจจาก Environment (ที่ซ่อนไว้) ---
 CHANNEL_ACCESS_TOKEN = os.environ.get('CHANNEL_ACCESS_TOKEN')
 CHANNEL_SECRET = os.environ.get('CHANNEL_SECRET')
-# PLATE_RECOGNIZER_API_KEY = os.environ.get('PLATE_RECOGNIZER_API_KEY') # <--- ลบออก
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 DATABASE_URL = os.environ.get('DATABASE_URL')
-GSPREAD_KEY_PATH = '/etc/secrets/gspread_key.json'
-GOOGLE_SHEET_NAME = os.environ.get('GOOGLE_SHEET_NAME')
 
-# --- 1.1 ตั้งค่าโซนเวลา (UTC+7) ---
 TH_TIMEZONE = pytz.timezone('Asia/Bangkok')
 
-# --- 2. ตั้งค่าระบบ Flask และ LINE ---
 app = Flask(__name__)
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
-# --- 2.1 ตั้งค่า "สมอง" Gemini ---
 genai.configure(api_key=GEMINI_API_KEY)
 system_instruction = (
-    "คุณคือ 'test' แชทบอทผู้ช่วยอัจฉยะ..." # (บุคลิกบอทของคุณ)
+    "คุณคือ 'test' แชทบอทผู้ช่วยอัจฉยะ ที่เชี่ยวชาญการอ่านป้ายทะเบียนรถ"
+    "หน้าที่ของคุณคือพูดคุยทั่วไปด้วยภาษาไทยที่เป็นกันเองและให้ความช่วยเหลือ"
+    "ถ้าผู้ใช้ขอให้อ่านป้ายทะเบียน ให้คุณตอบว่า 'แน่นอนครับ! ส่งรูปภาพหรือวิดีโอเข้ามาได้เลย'"
+    "ถ้าผู้ใช้ถาม 'รายงาน' หรือ 'ดู' (เช่น 'รายงาน 25/10/2025') ให้ตอบกลับด้วยข้อมูลจากระบบ"
 )
-gemini_model = None
+gemini_vision_model = None
+gemini_chat_model = None
 gemini_chat = None
 try:
-    gemini_model = genai.GenerativeModel(
+    gemini_vision_model = genai.GenerativeModel('models/gemini-flash-latest')
+    gemini_chat_model = genai.GenerativeModel(
         'models/gemini-flash-latest',
         system_instruction=system_instruction
     )
-    gemini_chat = gemini_model.start_chat(history=[])
+    gemini_chat = gemini_chat_model.start_chat(history=[])
     print("Gemini (สมอง) เชื่อมต่อสำเร็จ!")
 except Exception as e:
     print(f"Gemini (สมอง) เชื่อมต่อล้มเหลว: {e}")
 
-# --- 2.2 ตั้งค่า "สมุดบันทึก" (Database) ---
 Base = declarative_base()
 engine = None
 SessionLocal = None
+
 class LicensePlateLog(Base):
     __tablename__ = "license_plate_logs"
     id = Column(Integer, primary_key=True, index=True)
     plate = Column(String, index=True)
     province = Column(String)
     timestamp = Column(DateTime(timezone=True), server_default=func.now()) # UTC
+
 if DATABASE_URL:
     try:
         db_url_corrected = DATABASE_URL
@@ -101,41 +84,8 @@ if DATABASE_URL:
 else:
     print("ไม่พบ DATABASE_URL! ระบบบันทึกข้อมูล (DB) จะถูกปิดใช้งาน")
 
-# --- 2.3 ตั้งค่า "Google Sheet" ---
-gs_client = None
-if os.path.exists(GSPREAD_KEY_PATH) and GOOGLE_SHEET_NAME:
-    try:
-        scopes = [
-            'https://www.googleapis.com/auth/spreadsheets',
-            'https://www.googleapis.com/auth/drive.file'
-        ]
-        creds = Credentials.from_service_account_file(GSPREAD_KEY_PATH, scopes=scopes)
-        gs_client = gspread.authorize(creds)
-        print("Google Sheet (สมุดสำเนา) เชื่อมต่อสำเร็จ!")
-    except Exception as e:
-        print(f"Google Sheet เชื่อมต่อล้มเหลว: {e}")
-else:
-    print("ไม่พบ GSPREAD_KEY_PATH หรือ GOOGLE_SHEET_NAME! ระบบ Google Sheet จะถูกปิดใช้งาน")
-
-# --- ฟังก์ชันช่วยบันทึกลง Sheet ---
-def log_plate_to_sheet(plate_number, province_name, timestamp_th_str):
-    if not gs_client:
-        print("Google Sheet logging skipped (no connection).")
-        return
-    try:
-        sh = gs_client.open(GOOGLE_SHEET_NAME)
-        worksheet = sh.get_worksheet(0)
-        row_to_add = [timestamp_th_str, plate_number, province_name]
-        worksheet.append_row(row_to_add)
-        print(f"บันทึกลง Google Sheet สำเร็จ: {plate_number}")
-    except Exception as e:
-        print(f"บันทึกลง Google Sheet ล้มเหลว: {e}")
-
-# --- ฟังก์ชันช่วยบันทึก (DB + Sheet) ---
 def log_plate(plate_number, province_name):
     now_th = datetime.datetime.now(TH_TIMEZONE)
-    timestamp_th_str_for_sheet = now_th.strftime('%Y-%m-%d %H:%M:%S')
-    # 1. บันทึกลง DB
     if SessionLocal:
         session = SessionLocal()
         try:
@@ -148,10 +98,7 @@ def log_plate(plate_number, province_name):
             session.rollback()
         finally:
             session.close()
-    # 2. บันทึกลง Sheet
-    log_plate_to_sheet(plate_number, province_name, timestamp_th_str_for_sheet)
 
-# --- 3. สร้าง "ประตู" ชื่อ /callback ---
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -159,58 +106,66 @@ def callback():
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        print("Invalid signature. Please check your channel access token/secret.")
+        print("Invalid signature.")
         abort(400)
     except Exception as e:
-        print(f"Error occurred in callback: {e}")
+        print(f"Error in callback: {e}")
         abort(500)
     return 'OK'
 
-# --- 4. สอนบอท: ถ้าได้รับ "รูปภาพ" (ใช้ Gemini อ่าน + บันทึก) ---
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_blob_api = MessagingApiBlob(api_client)
         message_content = line_bot_blob_api.get_message_content(message_id=event.message.id)
-        reply_text = ""
+        ocr_result_text = "ขออภัยครับ ไม่สามารถอ่านภาพได้"
+        explanation_text = ""
         try:
-            if not gemini_model: raise Exception("Gemini model not initialized.")
+            if not gemini_vision_model: raise Exception("Gemini Vision model not initialized.")
             img = Image.open(io.BytesIO(message_content))
-            prompt_text = (
+            prompt_ocr = (
                 "นี่คือภาพถ่ายป้ายทะเบียนรถจากประเทศไทย..."
                 "โปรดอ่าน 'หมวดอักษรและตัวเลข' และ 'จังหวัด' บนป้ายทะเบียนนี้"
                 "และตอบกลับในรูปแบบ:\nเลขทะเบียน: [ที่อ่านได้]\nจังหวัด: [ที่อ่านได้]"
                 "(หากอ่านจังหวัดไม่ชัดเจน ให้ตอบว่า 'ไม่ชัดเจน' หรือ 'ไม่พบจังหวัด')"
             )
-            response = gemini_model.generate_content([prompt_text, img])
-            gemini_response = response.text
+            response_ocr = gemini_vision_model.generate_content([prompt_ocr, img])
+            ocr_result_text = response_ocr.text
             try:
-                plate_line = next((line for line in gemini_response.split('\n') if "เลขทะเบียน:" in line), None)
-                prov_line = next((line for line in gemini_response.split('\n') if "จังหวัด:" in line), None)
+                plate_line = next((line for line in ocr_result_text.split('\n') if "เลขทะเบียน:" in line), None)
+                prov_line = next((line for line in ocr_result_text.split('\n') if "จังหวัด:" in line), None)
                 if plate_line and prov_line:
-                    plate_number = plate_line.split(":")[-1].strip()
-                    province = prov_line.split(":")[-1].strip()
-                    if plate_number and province not in ["ไม่ชัดเจน", "ไม่พบจังหวัด", ""]:
-                        log_plate(plate_number, province)
+                    plate_number_for_log = plate_line.split(":")[-1].strip()
+                    province_for_log = prov_line.split(":")[-1].strip()
+                    if plate_number_for_log and province_for_log not in ["ไม่ชัดเจน", "ไม่พบจังหวัด", ""]:
+                        log_plate(plate_number_for_log, province_for_log)
+                        if gemini_chat:
+                            try:
+                                prompt_explain = f"อธิบายความหมาย ประเภท และลักษณะ (เช่น สีพื้นหลัง สีตัวอักษร) ของป้ายทะเบียนไทย '{plate_number_for_log}' จากจังหวัด '{province_for_log}' ให้หน่อยครับ"
+                                response_explain = gemini_chat.send_message(prompt_explain)
+                                explanation_text = "\n\n--- ความหมาย ---\n" + response_explain.text
+                            except Exception as explain_e:
+                                print(f"Gemini ไม่สามารถอธิบายป้าย: {explain_e}")
+                                explanation_text = "\n\n(ขออภัย ไม่สามารถดึงข้อมูลความหมายได้)"
+                        else:
+                             explanation_text = "\n\n(ขออภัย ไม่สามารถเชื่อมต่อ Gemini เพื่อขอความหมายได้)"
             except Exception as log_e:
-                print(f"ไม่สามารถแยกข้อมูลจาก Gemini เพื่อ log: {log_e}")
-            reply_text = gemini_response
+                print(f"ไม่สามารถแยกข้อมูลจาก Gemini OCR เพื่อ log/explain: {log_e}")
         except Exception as e:
-            print(f"Error in handle_image_message: {e}")
-            reply_text = f"เกิดข้อผิดพลาดในการอ่านภาพ: {e}"
+            print(f"Error in handle_image_message (Gemini Vision): {e}")
+            ocr_result_text = f"เกิดข้อผิดพลาดในการอ่านภาพ: {e}"
+        final_reply_text = ocr_result_text + explanation_text
         line_bot_api.reply_message_with_http_info(
-            ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)])
+            ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=final_reply_text)])
         )
 
-# --- 5. สอนบอท: ถ้าได้รับ "วิดีโอ" (ใช้ Gemini อ่าน + บันทึก) ---
 @handler.add(MessageEvent, message=VideoMessageContent)
 def handle_video_message(event):
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_blob_api = MessagingApiBlob(api_client)
         user_id = event.source.user_id
-
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
@@ -220,7 +175,7 @@ def handle_video_message(event):
         video_content = line_bot_blob_api.get_message_content(message_id=event.message.id)
         video_path = ""
         try:
-            if not gemini_model: raise Exception("Gemini model not initialized.")
+            if not gemini_vision_model: raise Exception("Gemini Vision model not initialized.")
             with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_video:
                 temp_video.write(video_content)
                 video_path = temp_video.name
@@ -229,7 +184,7 @@ def handle_video_message(event):
             found_plates_set = set()
             frame_count = 0
             prompt_text_frame = (
-                "นี่คือภาพเฟรมจากวิดีโอป้ายทะเบียนรถในประเทศไทย..." # (Prompt สำหรับ Gemini อ่านเฟรม)
+                "นี่คือภาพเฟรมจากวิดีโอป้ายทะเบียนรถในประเทศไทย..."
                 "ตอบกลับเฉพาะตัวอักษรและตัวเลขของป้ายทะเบียนและจังหวัดเท่านั้น ในรูปแบบ: [เลขทะเบียน],[จังหวัด]"
                 "(ถ้าไม่พบ หรืออ่านไม่ชัดเจน ให้ตอบว่า 'ไม่พบ')"
             )
@@ -243,7 +198,7 @@ def handle_video_message(event):
                     if not is_success: continue
                     image_bytes = buffer.tobytes()
                     img_frame = Image.open(io.BytesIO(image_bytes))
-                    response = gemini_model.generate_content([prompt_text_frame, img_frame])
+                    response = gemini_vision_model.generate_content([prompt_text_frame, img_frame])
                     gemini_text_result = response.text.strip()
                     if gemini_text_result != "ไม่พบ" and "," in gemini_text_result:
                         parts = gemini_text_result.split(',', 1)
@@ -279,7 +234,6 @@ def handle_video_message(event):
                 try: os.remove(video_path)
                 except Exception as remove_e: print(f"ไม่สามารถลบไฟล์วิดีโอชั่วคราวได้: {remove_e}")
 
-# --- 6. สอนบอท: ถ้าได้รับ "ข้อความ" (รายงาน/ดู/แชท) ---
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
     user_text = event.message.text.strip()
@@ -370,7 +324,6 @@ def handle_text_message(event):
             ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)])
         )
 
-# --- 7. สอนบอท: ถ้าได้รับ "อย่างอื่น" ---
 @handler.default()
 def default(event):
     with ApiClient(configuration) as api_client:
@@ -382,7 +335,6 @@ def default(event):
             )
         )
 
-# --- 8. สั่งให้ "หลังร้าน" (เซิร์ฟเวอร์) เริ่มทำงาน ---
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)

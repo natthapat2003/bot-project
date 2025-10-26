@@ -127,14 +127,15 @@ def handle_image_message(event):
                         log_plate(plate_number_for_log, province_for_log)
                         if gemini_chat:
                             try:
-                                # *** เพิ่มคำสั่งให้แยกประเภทรถ ***
+                                # *** แก้ไข Prompt ตรงนี้ ให้ถามประเภทรถ ***
                                 prompt_explain = (
                                     f"ป้ายทะเบียนไทย '{plate_number_for_log}' จังหวัด '{province_for_log}' "
-                                    f"เป็นป้ายประเภทใด (เช่น รถยนต์ส่วนบุคคล, รถจักรยานยนต์) "
-                                    f"และมีความหมาย/ลักษณะอย่างไร (สีพื้นหลัง, สีตัวอักษร)?"
+                                    f"เป็นป้ายของ **รถยนต์** หรือ **รถจักรยานยนต์**? " # <--- เพิ่มคำถามนี้
+                                    f"และเป็นป้ายประเภทใด (เช่น ส่วนบุคคล, สาธารณะ) "
+                                    f"มีความหมาย/ลักษณะอย่างไร (สีพื้นหลัง, สีตัวอักษร)?"
                                 )
                                 response_explain = gemini_chat.send_message(prompt_explain)
-                                explanation_text = "\n\n--- ข้อมูลป้าย ---\n" + response_explain.text # ใช้ชื่อ section ใหม่
+                                explanation_text = "\n\n--- ข้อมูลป้าย ---\n" + response_explain.text
                             except Exception as explain_e:
                                 print(f"Gemini explanation failed: {explain_e}")
                                 explanation_text = "\n\n(ไม่สามารถดึงข้อมูลป้ายได้)"

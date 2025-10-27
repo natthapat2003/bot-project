@@ -25,7 +25,7 @@ CHANNEL_ACCESS_TOKEN = os.environ.get('CHANNEL_ACCESS_TOKEN')
 CHANNEL_SECRET = os.environ.get('CHANNEL_SECRET')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 DATABASE_URL = os.environ.get('DATABASE_URL')
-TH_TIMEZONE = pytz.timezone('Asia/Bangkok')
+TH_TIMEZONE = pytz.timezone('Asia/Bangkok') # ยังใช้สำหรับเวลาบันทึก
 
 # --- App Init ---
 app = Flask(__name__)
@@ -40,7 +40,7 @@ chat_session = None
 try:
     vision_model = genai.GenerativeModel('models/gemini-flash-latest')
     system_instruction = ( # System instruction for chat model only
-        "คุณคือ 'test' แชทบอทผู้ช่วยอัจฉยะ ที่เชี่ยวชาญการอ่านป้ายทะเบียนรถไทย..."
+        "คุณคือ 'test' แชทบอทผู้ช่วย..." # (บุคลิกบอท)
     )
     chat_model = genai.GenerativeModel(
         'models/gemini-flash-latest', system_instruction=system_instruction
@@ -58,8 +58,9 @@ class LicensePlateLog(Base):
     __tablename__ = "license_plate_logs"
     id = Column(Integer, primary_key=True, index=True)
     plate = Column(String, index=True)
-    province = Column(String)
+    province = Column(String) # อาจจะเก็บ 'ประเทศ' หรือ 'ภูมิภาค' แทน หรือปล่อยว่าง
     timestamp = Column(DateTime(timezone=True), server_default=func.now()) # UTC
+# ... (โค้ดเชื่อมต่อ DB เหมือนเดิม) ...
 if DATABASE_URL:
     try:
         db_url_corrected = DATABASE_URL.replace("postgres://", "postgresql://", 1) if DATABASE_URL.startswith("postgres://") else DATABASE_URL
@@ -73,15 +74,16 @@ else:
     print("DATABASE_URL not found, DB logging disabled.")
 
 # --- Helper: Log Plate ---
-def log_plate(plate_number, province_name):
+def log_plate(plate_number, region_info): # เปลี่ยน province เป็น region_info
     now_th = datetime.datetime.now(TH_TIMEZONE)
     if SessionLocal:
         session = SessionLocal()
         try:
-            new_log = LicensePlateLog(plate=plate_number, province=province_name, timestamp=now_th)
+            # เก็บ region_info ลงคอลัมน์ province (หรือจะเพิ่มคอลัมน์ใหม่ก็ได้)
+            new_log = LicensePlateLog(plate=plate_number, province=region_info, timestamp=now_th)
             session.add(new_log)
             session.commit()
-            print(f"Logged to DB: {plate_number}")
+            print(f"Logged to DB: {plate_number} ({region_info})")
         except Exception as e:
             print(f"DB log failed: {e}")
             session.rollback()
@@ -91,6 +93,7 @@ def log_plate(plate_number, province_name):
 # --- Webhook Callback ---
 @app.route("/callback", methods=['POST'])
 def callback():
+    # ... (เหมือนเดิม) ...
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
     try:
@@ -103,63 +106,62 @@ def callback():
         abort(500)
     return 'OK'
 
-# --- Handle Image (‼️ อัปเกรด: รวม Prompt ‼️) ---
+# --- Handle Image (‼️ อัปเกรด: Prompt อ่านป้ายทั่วโลก ‼️) ---
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_blob_api = MessagingApiBlob(api_client)
-        reply_text = "ขออภัย เกิดข้อผิดพลาดในการประมวลผลภาพ" # Default error message
+        message_content = line_bot_blob_api.get_message_content(message_id=event.message.id)
+        reply_text = "ขออภัย อ่านภาพไม่ได้"
         try:
-            message_content = line_bot_blob_api.get_message_content(message_id=event.message.id)
             if not vision_model: raise Exception("Vision model not ready.")
-
             img = Image.open(io.BytesIO(message_content))
 
-            # *** Prompt ใหม่: สั่งให้อ่าน OCR และอธิบายในครั้งเดียว ***
-            prompt_combined = (
-                "วิเคราะห์ภาพป้ายทะเบียนรถไทยนี้:\n"
-                "1. อ่าน 'เลขทะเบียน' และ 'จังหวัด' ให้แม่นยำที่สุด\n"
-                "2. ระบุว่าเป็นป้าย **รถยนต์** หรือ **รถจักรยานยนต์**\n"
-                "3. อธิบายประเภทป้าย (เช่น ส่วนบุคคล, สาธารณะ) และลักษณะ (สีพื้น, สีตัวอักษร)\n"
-                "ตอบกลับโดยขึ้นต้นด้วย:\n"
-                "เลขทะเบียน: [ที่อ่านได้]\n"
-                "จังหวัด: [ที่อ่านได้]\n"
-                "--- ข้อมูลป้าย ---\n"
-                "[คำอธิบายประเภทและลักษณะ]\n"
-                "(หากส่วนใดอ่านไม่ชัดเจน ให้ระบุว่า 'ไม่ชัดเจน')"
+            # *** Prompt ใหม่: อ่านป้ายทะเบียนใดๆ ในภาพ ***
+            prompt_ocr_global = (
+                "วิเคราะห์ภาพนี้เพื่อหาป้ายทะเบียนรถ (License Plate):\n"
+                "1. อ่านข้อความ (ตัวเลข/ตัวอักษร) บนป้ายทะเบียนให้แม่นยำที่สุด\n"
+                "2. ระบุ ประเทศ หรือ ภูมิภาค (เช่น รัฐ, จังหวัด) ของป้ายทะเบียน ถ้าสามารถระบุได้จากรูปแบบหรือสัญลักษณ์บนป้าย\n"
+                "ตอบกลับในรูปแบบ:\n"
+                "ป้ายทะเบียน: [ข้อความที่อ่านได้]\n"
+                "ประเทศ/ภูมิภาค: [ที่ระบุได้ หรือ 'ไม่ทราบ']\n"
+                "(หากไม่พบป้ายทะเบียนในภาพ ให้ตอบว่า 'ไม่พบป้ายทะเบียน')"
             )
 
-            # *** เรียก Gemini ครั้งเดียว ***
-            response = vision_model.generate_content([prompt_combined, img])
-            reply_text = response.text # ใช้ผลลัพธ์จาก Gemini เป็นคำตอบเลย
+            response = vision_model.generate_content([prompt_ocr_global, img])
+            reply_text = response.text # ใช้ผลลัพธ์จาก Gemini เป็นคำตอบ
 
-            # (พยายามดึงข้อมูลเพื่อบันทึก - ไม่มีผลต่อการตอบกลับ)
+            # (พยายามดึงข้อมูลเพื่อบันทึก - อาจต้องปรับปรุงตามรูปแบบคำตอบของ Gemini)
             try:
-                plate_line = next((line for line in reply_text.split('\n') if "เลขทะเบียน:" in line), None)
-                prov_line = next((line for line in reply_text.split('\n') if "จังหวัด:" in line), None)
-                if plate_line and prov_line:
+                plate_line = next((line for line in reply_text.split('\n') if "ป้ายทะเบียน:" in line), None)
+                region_line = next((line for line in reply_text.split('\n') if "ประเทศ/ภูมิภาค:" in line), None)
+
+                if plate_line:
                     plate_number_for_log = plate_line.split(":")[-1].strip()
-                    province_for_log = prov_line.split(":")[-1].strip()
-                    if plate_number_for_log and province_for_log not in ["ไม่ชัดเจน", ""]:
-                        log_plate(plate_number_for_log, province_for_log)
+                    region_info_for_log = "ไม่ทราบ" # ค่าเริ่มต้น
+                    if region_line:
+                        region_info_for_log = region_line.split(":")[-1].strip()
+
+                    # บันทึกเฉพาะเมื่ออ่านป้ายเจอ (ไม่สนใจว่ารู้ประเทศไหม)
+                    if plate_number_for_log and plate_number_for_log != "ไม่พบป้ายทะเบียน":
+                        log_plate(plate_number_for_log, region_info_for_log)
+
             except Exception as log_e:
-                print(f"OCR parsing/logging failed after combined call: {log_e}")
+                print(f"OCR parsing/logging failed (global): {log_e}")
 
         except Exception as e:
             print(f"Image handling error: {e}")
-            # ใช้ default error message ที่ตั้งไว้ตอนแรก
-            # อาจเพิ่มรายละเอียด error ถ้าต้องการ: reply_text = f"เกิดข้อผิดพลาด: {e}"
+            reply_text = f"เกิดข้อผิดพลาดในการอ่านภาพ: {e}"
 
-        # ส่งคำตอบกลับไป
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)])
         )
 
-# --- Handle Video ---
+
+# --- Handle Video (‼️ อัปเกรด: Prompt อ่านเฟรมทั่วโลก ‼️) ---
 @handler.add(MessageEvent, message=VideoMessageContent)
 def handle_video_message(event):
-    # ... (โค้ดส่วนนี้เหมือนเดิม ใช้ Gemini อ่านทีละเฟรม) ...
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_blob_api = MessagingApiBlob(api_client)
@@ -176,39 +178,40 @@ def handle_video_message(event):
                 video_path = temp_video.name
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened(): raise Exception("Cannot open video file.")
-            found_plates_set = set()
+            found_plates_set = set() # เก็บเป็น String เต็มๆ ที่ Gemini ตอบ
             frame_count = 0
-            prompt_text_frame = (
-                "อ่านป้ายทะเบียนรถไทยในภาพเฟรมนี้ ตอบรูปแบบ: [เลขทะเบียน],[จังหวัด] (ถ้าไม่พบ ตอบ 'ไม่พบ')"
+
+            # *** Prompt ใหม่: อ่านป้ายใดๆ ในเฟรม ***
+            prompt_text_frame_global = (
+                "อ่านข้อความป้ายทะเบียนรถในภาพเฟรมนี้ ถ้าพบ"
+                "ตอบกลับเฉพาะข้อความบนป้ายเท่านั้น (ไม่ต้องระบุประเทศ)"
+                "(ถ้าไม่พบ ตอบ 'ไม่พบ')"
             )
+
             while True:
                 ret, frame = cap.read()
                 if not ret: break
                 frame_count += 1
-                # --- (ทางเลือก) เพิ่ม Frame Skipping ตรงนี้ได้ เช่น % 90 ---
                 if frame_count % 60 != 0: continue
                 try:
                     is_success, buffer = cv2.imencode(".jpg", frame)
                     if not is_success: continue
                     image_bytes = buffer.tobytes()
                     img_frame = Image.open(io.BytesIO(image_bytes))
-                    response = vision_model.generate_content([prompt_text_frame, img_frame])
+                    response = vision_model.generate_content([prompt_text_frame_global, img_frame])
                     ocr_text_result = response.text.strip()
-                    if ocr_text_result != "ไม่พบ" and "," in ocr_text_result:
-                        parts = ocr_text_result.split(',', 1)
-                        if len(parts) == 2:
-                            plate_number, province = parts[0].strip(), parts[1].strip()
-                            if plate_number and province:
-                                plate_full_name = f"{plate_number} (จ. {province})"
-                                if plate_full_name not in found_plates_set:
-                                    log_plate(plate_number, province)
-                                    found_plates_set.add(plate_full_name)
+                    if ocr_text_result != "ไม่พบ":
+                        plate_number = ocr_text_result # ใช้ข้อความที่อ่านได้เลย
+                        region = "ไม่ทราบ (วิดีโอ)" # วิดีโออ่านประเทศยาก
+                        if plate_number not in found_plates_set:
+                             log_plate(plate_number, region)
+                             found_plates_set.add(plate_number) # เก็บแค่เลขป้ายที่เจอ
                 except Exception as frame_e:
                     print(f"Frame read failed (frame {frame_count}): {frame_e}")
             cap.release()
             if found_plates_set:
-                final_text = f"ผลประมวลผลวิดีโอ:\n" + "\n".join(list(found_plates_set)[:10])
-                if len(found_plates_set) > 10: final_text += "\n(และอื่นๆ...)"
+                final_text = f"ผลประมวลผลวิดีโอ:\n" + "\n".join(list(found_plates_set)[:15]) # เพิ่มจำนวนแสดงผล
+                if len(found_plates_set) > 15: final_text += "\n(และอื่นๆ...)"
             else:
                 final_text = "ผลประมวลผลวิดีโอ:\nไม่พบป้ายทะเบียน"
             line_bot_api.push_message(PushMessageRequest(to=user_id, messages=[TextMessage(text=final_text)]))
@@ -220,10 +223,10 @@ def handle_video_message(event):
                 try: os.remove(video_path)
                 except Exception as remove_e: print(f"Cannot remove temp video: {remove_e}")
 
-# --- Handle Text ---
+# --- Handle Text (รายงาน/ดู/แชท) ---
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
-    # ... (โค้ดส่วนนี้เหมือนเดิม จัดการ "รายงาน", "ดู", และแชท) ...
+    # ... (โค้ดส่วนนี้เหมือนเดิม) ...
     user_text = event.message.text.strip()
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
@@ -286,7 +289,8 @@ def handle_text_message(event):
                             for i, (plate, province, timestamp_utc) in enumerate(logs):
                                 timestamp_th = timestamp_utc.astimezone(TH_TIMEZONE)
                                 time_str = timestamp_th.strftime('%H:%M น.')
-                                reply_text += f"* {time_str}: {plate} (จ. {province})\n"
+                                # แสดง province ที่บันทึกไว้ (อาจจะเป็น 'ไม่ทราบ' หรือชื่อประเทศ)
+                                reply_text += f"* {time_str}: {plate} ({province})\n"
                     except ValueError:
                         reply_text = "รูปแบบวันที่ผิด 😅 (ใช้ DD/MM/YYYY)"
                 else:
@@ -313,7 +317,7 @@ def handle_text_message(event):
 # --- Handle Default ---
 @handler.default()
 def default(event):
-    # ... (โค้ดส่วนนี้เหมือนเดิม) ...
+    # ... (เหมือนเดิม) ...
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message_with_http_info(

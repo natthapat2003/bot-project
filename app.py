@@ -105,8 +105,7 @@ def handle_image_message(event):
         line_bot_api = MessagingApi(api_client)
         line_bot_blob_api = MessagingApiBlob(api_client)
         message_content = line_bot_blob_api.get_message_content(message_id=event.message.id)
-        ocr_result_text = "ขออภัย อ่านภาพไม่ได้"
-        explanation_text = ""
+        reply_text = "ขออภัย อ่านภาพไม่ได้" # ค่าเริ่มต้น
         try:
             if not gemini_vision_model: raise Exception("Gemini Vision not ready.")
             img = Image.open(io.BytesIO(message_content))
@@ -116,40 +115,35 @@ def handle_image_message(event):
                 "(ถ้าไม่ชัดเจน ตอบ 'ไม่ชัดเจน')"
             )
             response_ocr = gemini_vision_model.generate_content([prompt_ocr, img])
-            ocr_result_text = response_ocr.text
+            reply_text = response_ocr.text # ใช้ผล OCR เป็นคำตอบเลย
             try:
-                plate_line = next((line for line in ocr_result_text.split('\n') if "เลขทะเบียน:" in line), None)
-                prov_line = next((line for line in ocr_result_text.split('\n') if "จังหวัด:" in line), None)
+                # พยายามดึงข้อมูลเพื่อบันทึก (เหมือนเดิม)
+                plate_line = next((line for line in reply_text.split('\n') if "เลขทะเบียน:" in line), None)
+                prov_line = next((line for line in reply_text.split('\n') if "จังหวัด:" in line), None)
                 if plate_line and prov_line:
                     plate_number_for_log = plate_line.split(":")[-1].strip()
                     province_for_log = prov_line.split(":")[-1].strip()
                     if plate_number_for_log and province_for_log not in ["ไม่ชัดเจน", ""]:
                         log_plate(plate_number_for_log, province_for_log)
-                        if gemini_chat:
-                            try:
-                                # *** แก้ไข Prompt ตรงนี้ ให้ถามประเภทรถ ***
-                                prompt_explain = (
-                                    f"ป้ายทะเบียนไทย '{plate_number_for_log}' จังหวัด '{province_for_log}' "
-                                    f"เป็นป้ายของ **รถยนต์** หรือ **รถจักรยานยนต์**? " # <--- เพิ่มคำถามนี้
-                                    f"และเป็นป้ายประเภทใด (เช่น ส่วนบุคคล, สาธารณะ) "
-                                    f"มีความหมาย/ลักษณะอย่างไร (สีพื้นหลัง, สีตัวอักษร)?"
-                                )
-                                response_explain = gemini_chat.send_message(prompt_explain)
-                                explanation_text = "\n\n--- ข้อมูลป้าย ---\n" + response_explain.text
-                            except Exception as explain_e:
-                                print(f"Gemini explanation failed: {explain_e}")
-                                explanation_text = "\n\n(ไม่สามารถดึงข้อมูลป้ายได้)"
-                        else:
-                             explanation_text = "\n\n(Gemini chat not ready for explanation)"
+                        # --- ลบส่วนขอคำอธิบายออก ---
+                        # if gemini_chat:
+                        #     try:
+                        #         prompt_explain = ...
+                        #         response_explain = gemini_chat.send_message(prompt_explain)
+                        #         explanation_text = ...
+                        #     except Exception as explain_e: ...
+                        # else: ...
             except Exception as log_e:
                 print(f"OCR parsing/logging failed: {log_e}")
         except Exception as e:
             print(f"Image handling error: {e}")
-            ocr_result_text = f"เกิดข้อผิดพลาดในการอ่านภาพ: {e}"
-        final_reply_text = ocr_result_text + explanation_text
+            reply_text = f"เกิดข้อผิดพลาดในการอ่านภาพ: {e}"
+
+        # ส่งเฉพาะผล OCR กลับไป
         line_bot_api.reply_message_with_http_info(
-            ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=final_reply_text)])
+            ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)])
         )
+
 
 @handler.add(MessageEvent, message=VideoMessageContent)
 def handle_video_message(event):

@@ -34,12 +34,25 @@ handler = WebhookHandler(CHANNEL_SECRET)
 # --- AI Model Init ---
 genai.configure(api_key=GEMINI_API_KEY)
 vision_model = None
+chat_model = None
+chat_session = None
 request_options = {"timeout": 60} # Timeout for API calls
 try:
     vision_model = genai.GenerativeModel('models/gemini-flash-latest')
-    print("AI Vision Model initialized.")
+    # --- System Instruction (สำคัญสำหรับ Chat) ---
+    system_instruction = (
+        "คุณคือ 'test' แชทบอทผู้ช่วยอัจฉยะ ที่เชี่ยวชาญการอ่านป้ายทะเบียนรถ"
+        "หน้าที่ของคุณคือพูดคุยทั่วไปด้วยภาษาไทยที่เป็นกันเองและให้ความช่วยเหลือ"
+        "ถ้าผู้ใช้ขอให้อ่านป้ายทะเบียน ให้คุณตอบว่า 'แน่นอนครับ! ส่งรูปภาพหรือวิดีโอเข้ามาได้เลย'"
+        "ถ้าผู้ใช้ส่งรูปภาพหรือวิดีโอมา คุณจะถูกเรียกใช้ฟังก์ชันอื่นเพื่อประมวลผล (คุณไม่ต้องตอบเรื่องรูป/วิดีโอ)"
+    )
+    chat_model = genai.GenerativeModel(
+        'models/gemini-flash-latest', system_instruction=system_instruction
+    )
+    chat_session = chat_model.start_chat(history=[])
+    print("AI Models initialized.")
 except Exception as e:
-    print(f"AI Vision Model init failed: {e}")
+    print(f"AI Models init failed: {e}")
 
 # --- Database/Log Plate Removed ---
 print("Database functionality disabled.")
@@ -59,7 +72,7 @@ def callback():
         abort(500)
     return 'OK'
 
-# --- Handle Image (‼️ อ่าน + วิเคราะห์ละเอียด ‼️) ---
+# --- Handle Image (อ่าน + วิเคราะห์) ---
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     with ApiClient(configuration) as api_client:
@@ -72,7 +85,6 @@ def handle_image_message(event):
 
             img = Image.open(io.BytesIO(message_content))
 
-            # *** Prompt ใหม่: สั่งให้อ่าน OCR + วิเคราะห์ละเอียด ***
             prompt_detailed = (
                 "วิเคราะห์ภาพนี้เพื่อหาป้ายทะเบียนรถ:\n"
                 "1. อ่านข้อความบนป้าย (เลขทะเบียน) ให้แม่นยำที่สุด\n"
@@ -86,14 +98,12 @@ def handle_image_message(event):
                 "ลักษณะป้าย: [คำอธิบายประเภท/สี]\n"
                 "(หากไม่พบป้ายทะเบียนในภาพ ให้ตอบว่า 'ไม่พบป้ายทะเบียน')"
             )
-
-            # *** เรียก Gemini ครั้งเดียว ***
             try:
                 response = vision_model.generate_content(
                     [prompt_detailed, img],
                     request_options=request_options
                 )
-                reply_text = response.text # ใช้ผลลัพธ์จาก Gemini เป็นคำตอบ
+                reply_text = response.text
             except google_exceptions.DeadlineExceeded:
                 print("Vision timeout.")
                 reply_text = "ขออภัย AI ใช้เวลาประมวลผลภาพนี้นานเกินไป"
@@ -104,21 +114,17 @@ def handle_image_message(event):
                  print(f"Vision generation error: {gen_e}")
                  reply_text = f"ขออภัย AI ไม่สามารถประมวลผลภาพนี้ได้: {gen_e}"
 
-            # (ลบส่วนบันทึกข้อมูล)
-
         except (IOError, Image.UnidentifiedImageError):
              print("Invalid image format or corrupted image.")
              reply_text = "ขออภัย รูปแบบไฟล์ภาพไม่ถูกต้อง หรือไฟล์เสียหายครับ"
         except Exception as e:
             print(f"Image handling error: {e}")
-            # reply_text = f"เกิดข้อผิดพลาด: {e}"
 
-        # ส่งคำตอบกลับไป
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)])
         )
 
-# --- Handle Video (OCR Only - Simplified) ---
+# --- Handle Video (อ่านอย่างเดียว) ---
 @handler.add(MessageEvent, message=VideoMessageContent)
 def handle_video_message(event):
     with ApiClient(configuration) as api_client:
@@ -127,7 +133,7 @@ def handle_video_message(event):
         user_id = event.source.user_id
         try:
             line_bot_api.reply_message_with_http_info(
-                ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text='รับวิดีโอแล้ว กำลังอ่านป้ายทะเบียน... ⏳')]) # ข้อความสั้นลง
+                ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text='รับวิดีโอแล้ว กำลังอ่านป้ายทะเบียน... ⏳')])
             )
         except Exception as reply_e:
              print(f"Initial video reply failed: {reply_e}")
@@ -146,11 +152,9 @@ def handle_video_message(event):
             found_plates_set = set()
             frame_count = 0
             prompt_text_frame = (
-                "อ่านข้อความป้ายทะเบียนรถในภาพเฟรมนี้ ถ้าพบ"
-                "ตอบกลับเฉพาะข้อความบนป้ายเท่านั้น"
-                "(ถ้าไม่พบ ตอบ 'ไม่พบ')"
+                 "อ่านข้อความป้ายทะเบียนรถในภาพเฟรมนี้ ถ้าพบ ตอบกลับเฉพาะข้อความบนป้าย (ถ้าไม่พบ ตอบ 'ไม่พบ')"
             )
-            frame_request_options = {"timeout": 15}
+            frame_request_options = {"timeout": 20} # เพิ่ม Timeout
 
             while True:
                 ret, frame = cap.read()
@@ -168,14 +172,16 @@ def handle_video_message(event):
                             request_options=frame_request_options
                         )
                         ocr_text_result = response.text.strip()
-                    except google_exceptions.DeadlineExceeded: continue # ข้ามเฟรมถ้า Timeout
-                    except Exception: continue # ข้ามเฟรมถ้า Error อื่นๆ
+                    except google_exceptions.DeadlineExceeded: continue
+                    except Exception: continue
 
                     if ocr_text_result != "ไม่พบ":
                         plate_number = ocr_text_result
                         if plate_number not in found_plates_set:
                              found_plates_set.add(plate_number)
-                except Exception: continue # ข้ามเฟรมถ้า Error
+                except Exception as inner_e:
+                    print(f"Error processing frame {frame_count}: {inner_e}")
+                    continue
             cap.release()
 
             if found_plates_set:
@@ -196,12 +202,37 @@ def handle_video_message(event):
                 try: os.remove(video_path)
                 except Exception as remove_e: print(f"Cannot remove temp video: {remove_e}")
 
-# --- Handle Text (ตอบกลับอย่างเดียว) ---
+# --- Handle Text (Chat Only) ---
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
+    user_text = event.message.text.strip()
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
-        reply_text = "กรุณาส่งรูปภาพหรือวิดีโอที่มีป้ายทะเบียนครับ" # ตอบกลับข้อความตายตัว
+        reply_text = ""
+
+        # --- ให้ Gemini คุยอย่างเดียว ---
+        if not chat_session:
+            reply_text = "ขออภัย สมองผมยังไม่พร้อม"
+        else:
+            try:
+                 # *** เรียก Gemini Chat (มี Timeout) ***
+                response = chat_session.send_message(
+                    user_text,
+                    request_options=request_options # ใช้ Timeout กลาง
+                )
+                reply_text = response.text
+            # --- จัดการ Error จาก Gemini Chat ---
+            except google_exceptions.DeadlineExceeded:
+                 print("Chat timeout.")
+                 reply_text = "ขออภัยครับ ตอนนี้ผมตอบกลับช้า โปรดลองอีกครั้ง"
+            except google_exceptions.GoogleAPIError as chat_api_error:
+                 print(f"Chat API Error: {chat_api_error}")
+                 reply_text = f"ขออภัย เกิดข้อผิดพลาดในการสื่อสารกับ AI ({chat_api_error.grpc_status_code})"
+            except Exception as e:
+                 print(f"Chat error: {e}")
+                 reply_text = f"ขออภัย สมองผมมีปัญหา: {e}"
+            # --- จบส่วนจัดการ Error ---
+
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)])
         )
@@ -222,4 +253,3 @@ def default(event):
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
-

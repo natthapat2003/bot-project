@@ -226,7 +226,7 @@ def handle_video_message(event):
                 ret, frame = cap.read()
                 if not ret: break
                 frame_count += 1
-                if frame_count % 90 != 0: continue # ลองเพิ่ม Frame Skipping
+                if frame_count % 120 != 0: continue # ลองเพิ่ม Frame Skipping
                 try:
                     is_success, buffer = cv2.imencode(".jpg", frame)
                     if not is_success: continue
@@ -301,3 +301,4 @@ def default(event):
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
+

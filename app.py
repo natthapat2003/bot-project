@@ -30,25 +30,27 @@ app = Flask(__name__)
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
+# --- ตั้งค่า AI Model ---
 genai.configure(api_key=GEMINI_API_KEY)
 system_instruction = (
     "คุณคือ 'test' แชทบอทผู้ช่วยอัจฉยะ ที่เชี่ยวชาญการอ่านป้ายทะเบียนรถไทย"
     "หน้าที่คือคุยทั่วไป ถ้าผู้ใช้ขอให้อ่านป้าย ให้ตอบว่า 'ส่งรูปภาพหรือวิดีโอมาได้เลย'"
     "ถ้าผู้ใช้ถาม 'รายงาน' หรือ 'ดู' ให้ตอบกลับข้อมูลจากระบบ"
 )
-gemini_vision_model = None
-gemini_chat_model = None
-gemini_chat = None
+vision_model = None # เปลี่ยนชื่อตัวแปร
+chat_model = None   # เปลี่ยนชื่อตัวแปร
+chat_session = None # เปลี่ยนชื่อตัวแปร
 try:
-    gemini_vision_model = genai.GenerativeModel('models/gemini-flash-latest')
-    gemini_chat_model = genai.GenerativeModel(
-        'models/gemini-flash-latest', system_instruction=system_instruction
+    vision_model = genai.GenerativeModel('models/gemini-flash-latest') # ใช้ชื่อโมเดลเดิม
+    chat_model = genai.GenerativeModel(
+        'models/gemini-flash-latest', system_instruction=system_instruction # ใช้ชื่อโมเดลเดิม
     )
-    gemini_chat = gemini_chat_model.start_chat(history=[])
-    print("Gemini initialized.")
+    chat_session = chat_model.start_chat(history=[])
+    print("AI Model initialized.") # เปลี่ยนข้อความ
 except Exception as e:
-    print(f"Gemini init failed: {e}")
+    print(f"AI Model init failed: {e}") # เปลี่ยนข้อความ
 
+# --- ตั้งค่า Database ---
 Base = declarative_base()
 engine = None
 SessionLocal = None
@@ -70,6 +72,7 @@ if DATABASE_URL:
 else:
     print("DATABASE_URL not found, DB logging disabled.")
 
+# --- ฟังก์ชันบันทึก ---
 def log_plate(plate_number, province_name):
     now_th = datetime.datetime.now(TH_TIMEZONE)
     if SessionLocal:
@@ -85,6 +88,7 @@ def log_plate(plate_number, province_name):
         finally:
             session.close()
 
+# --- Webhook Callback ---
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -99,52 +103,59 @@ def callback():
         abort(500)
     return 'OK'
 
+# --- จัดการรูปภาพ ---
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_blob_api = MessagingApiBlob(api_client)
         message_content = line_bot_blob_api.get_message_content(message_id=event.message.id)
-        reply_text = "ขออภัย อ่านภาพไม่ได้" # ค่าเริ่มต้น
+        ocr_result_text = "ขออภัย อ่านภาพไม่ได้"
+        explanation_text = ""
         try:
-            if not gemini_vision_model: raise Exception("Gemini Vision not ready.")
+            if not vision_model: raise Exception("Vision model not ready.") # ใช้ชื่อตัวแปรใหม่
             img = Image.open(io.BytesIO(message_content))
             prompt_ocr = (
                 "อ่านป้ายทะเบียนรถไทยในภาพนี้"
                 "ตอบรูปแบบ:\nเลขทะเบียน: [ที่อ่านได้]\nจังหวัด: [ที่อ่านได้]"
                 "(ถ้าไม่ชัดเจน ตอบ 'ไม่ชัดเจน')"
             )
-            response_ocr = gemini_vision_model.generate_content([prompt_ocr, img])
-            reply_text = response_ocr.text # ใช้ผล OCR เป็นคำตอบเลย
+            response_ocr = vision_model.generate_content([prompt_ocr, img]) # ใช้ชื่อตัวแปรใหม่
+            ocr_result_text = response_ocr.text
             try:
-                # พยายามดึงข้อมูลเพื่อบันทึก (เหมือนเดิม)
-                plate_line = next((line for line in reply_text.split('\n') if "เลขทะเบียน:" in line), None)
-                prov_line = next((line for line in reply_text.split('\n') if "จังหวัด:" in line), None)
+                plate_line = next((line for line in ocr_result_text.split('\n') if "เลขทะเบียน:" in line), None)
+                prov_line = next((line for line in ocr_result_text.split('\n') if "จังหวัด:" in line), None)
                 if plate_line and prov_line:
                     plate_number_for_log = plate_line.split(":")[-1].strip()
                     province_for_log = prov_line.split(":")[-1].strip()
                     if plate_number_for_log and province_for_log not in ["ไม่ชัดเจน", ""]:
                         log_plate(plate_number_for_log, province_for_log)
-                        # --- ลบส่วนขอคำอธิบายออก ---
-                        # if gemini_chat:
-                        #     try:
-                        #         prompt_explain = ...
-                        #         response_explain = gemini_chat.send_message(prompt_explain)
-                        #         explanation_text = ...
-                        #     except Exception as explain_e: ...
-                        # else: ...
+                        if chat_session: # ใช้ชื่อตัวแปรใหม่
+                            try:
+                                prompt_explain = (
+                                    f"ป้ายทะเบียนไทย '{plate_number_for_log}' จังหวัด '{province_for_log}' "
+                                    f"เป็นป้ายของ **รถยนต์** หรือ **รถจักรยานยนต์**? "
+                                    f"และเป็นป้ายประเภทใด (เช่น ส่วนบุคคล, สาธารณะ) "
+                                    f"มีความหมาย/ลักษณะอย่างไร (สีพื้นหลัง, สีตัวอักษร)?"
+                                )
+                                response_explain = chat_session.send_message(prompt_explain) # ใช้ชื่อตัวแปรใหม่
+                                explanation_text = "\n\n--- ข้อมูลป้าย ---\n" + response_explain.text
+                            except Exception as explain_e:
+                                print(f"Explanation failed: {explain_e}") # เปลี่ยนข้อความ
+                                explanation_text = "\n\n(ไม่สามารถดึงข้อมูลป้ายได้)"
+                        else:
+                             explanation_text = "\n\n(Chat model not ready for explanation)" # เปลี่ยนข้อความ
             except Exception as log_e:
                 print(f"OCR parsing/logging failed: {log_e}")
         except Exception as e:
             print(f"Image handling error: {e}")
-            reply_text = f"เกิดข้อผิดพลาดในการอ่านภาพ: {e}"
-
-        # ส่งเฉพาะผล OCR กลับไป
+            ocr_result_text = f"เกิดข้อผิดพลาดในการอ่านภาพ: {e}"
+        final_reply_text = ocr_result_text + explanation_text
         line_bot_api.reply_message_with_http_info(
-            ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)])
+            ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=final_reply_text)])
         )
 
-
+# --- จัดการวิดีโอ ---
 @handler.add(MessageEvent, message=VideoMessageContent)
 def handle_video_message(event):
     with ApiClient(configuration) as api_client:
@@ -152,12 +163,12 @@ def handle_video_message(event):
         line_bot_blob_api = MessagingApiBlob(api_client)
         user_id = event.source.user_id
         line_bot_api.reply_message_with_http_info(
-            ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text='รับวิดีโอแล้ว กำลังประมวลผล (Gemini Vision)... ⏳')])
+            ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text='รับวิดีโอแล้ว กำลังประมวลผล (AI Vision)... ⏳')]) # เปลี่ยนข้อความ
         )
         video_content = line_bot_blob_api.get_message_content(message_id=event.message.id)
         video_path = ""
         try:
-            if not gemini_vision_model: raise Exception("Gemini Vision not ready.")
+            if not vision_model: raise Exception("Vision model not ready.") # ใช้ชื่อตัวแปรใหม่
             with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_video:
                 temp_video.write(video_content)
                 video_path = temp_video.name
@@ -180,10 +191,10 @@ def handle_video_message(event):
                     if not is_success: continue
                     image_bytes = buffer.tobytes()
                     img_frame = Image.open(io.BytesIO(image_bytes))
-                    response = gemini_vision_model.generate_content([prompt_text_frame, img_frame])
-                    gemini_text_result = response.text.strip()
-                    if gemini_text_result != "ไม่พบ" and "," in gemini_text_result:
-                        parts = gemini_text_result.split(',', 1)
+                    response = vision_model.generate_content([prompt_text_frame, img_frame]) # ใช้ชื่อตัวแปรใหม่
+                    ocr_text_result = response.text.strip() # เปลี่ยนชื่อตัวแปร
+                    if ocr_text_result != "ไม่พบ" and "," in ocr_text_result: # ใช้ชื่อตัวแปรใหม่
+                        parts = ocr_text_result.split(',', 1) # ใช้ชื่อตัวแปรใหม่
                         if len(parts) == 2:
                             plate_number, province = parts[0].strip(), parts[1].strip()
                             if plate_number and province:
@@ -192,13 +203,13 @@ def handle_video_message(event):
                                     log_plate(plate_number, province)
                                     found_plates_set.add(plate_full_name)
                 except Exception as frame_e:
-                    print(f"Gemini frame read failed (frame {frame_count}): {frame_e}")
+                    print(f"Frame read failed (frame {frame_count}): {frame_e}") # เปลี่ยนข้อความ
             cap.release()
             if found_plates_set:
-                final_text = f"ผลประมวลผลวิดีโอ (Gemini):\n" + "\n".join(list(found_plates_set)[:10])
+                final_text = f"ผลประมวลผลวิดีโอ:\n" + "\n".join(list(found_plates_set)[:10]) # เปลี่ยนข้อความ
                 if len(found_plates_set) > 10: final_text += "\n(และอื่นๆ...)"
             else:
-                final_text = "ผลประมวลผลวิดีโอ (Gemini):\nไม่พบป้ายทะเบียน"
+                final_text = "ผลประมวลผลวิดีโอ:\nไม่พบป้ายทะเบียน" # เปลี่ยนข้อความ
             line_bot_api.push_message(PushMessageRequest(to=user_id, messages=[TextMessage(text=final_text)]))
         except Exception as e:
             print(f"Video handling error: {e}")
@@ -208,6 +219,7 @@ def handle_video_message(event):
                 try: os.remove(video_path)
                 except Exception as remove_e: print(f"Cannot remove temp video: {remove_e}")
 
+# --- จัดการข้อความ ---
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
     user_text = event.message.text.strip()
@@ -283,19 +295,20 @@ def handle_text_message(event):
             finally:
                 session.close()
         else:
-            if not gemini_chat:
-                reply_text = "ขออภัย สมองผม (Gemini) ยังไม่พร้อม"
+            if not chat_session: # ใช้ชื่อตัวแปรใหม่
+                reply_text = "ขออภัย สมองผมยังไม่พร้อม" # เปลี่ยนข้อความ
             else:
                 try:
-                    response = gemini_chat.send_message(user_text)
+                    response = chat_session.send_message(user_text) # ใช้ชื่อตัวแปรใหม่
                     reply_text = response.text
                 except Exception as e:
-                    print(f"Gemini chat error: {e}")
+                    print(f"Chat error: {e}") # เปลี่ยนข้อความ
                     reply_text = f"ขออภัย สมองผมมีปัญหา: {e}"
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)])
         )
 
+# --- จัดการอื่นๆ ---
 @handler.default()
 def default(event):
     with ApiClient(configuration) as api_client:
@@ -307,6 +320,7 @@ def default(event):
             )
         )
 
+# --- รันเซิร์ฟเวอร์ ---
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)

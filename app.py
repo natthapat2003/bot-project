@@ -103,7 +103,7 @@ def callback():
         abort(500)
     return 'OK'
 
-# --- Handle Image (อัปเกรด: ถามประเภทรถ) ---
+# --- Handle Image (‼️ อัปเกรด: รวม Prompt ‼️) ---
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     with ApiClient(configuration) as api_client:
@@ -116,56 +116,44 @@ def handle_image_message(event):
 
             img = Image.open(io.BytesIO(message_content))
 
-            # *** Prompt OCR (เหมือนเดิม) ***
-            prompt_ocr = (
-                "อ่านป้ายทะเบียนรถไทยในภาพนี้"
-                "ตอบรูปแบบ:\nเลขทะเบียน: [ที่อ่านได้]\nจังหวัด: [ที่อ่านได้]"
-                "(ถ้าไม่ชัดเจน ตอบ 'ไม่ชัดเจน')"
+            # *** Prompt ใหม่: สั่งให้อ่าน OCR และอธิบายในครั้งเดียว ***
+            prompt_combined = (
+                "วิเคราะห์ภาพป้ายทะเบียนรถไทยนี้:\n"
+                "1. อ่าน 'เลขทะเบียน' และ 'จังหวัด' ให้แม่นยำที่สุด\n"
+                "2. ระบุว่าเป็นป้าย **รถยนต์** หรือ **รถจักรยานยนต์**\n"
+                "3. อธิบายประเภทป้าย (เช่น ส่วนบุคคล, สาธารณะ) และลักษณะ (สีพื้น, สีตัวอักษร)\n"
+                "ตอบกลับโดยขึ้นต้นด้วย:\n"
+                "เลขทะเบียน: [ที่อ่านได้]\n"
+                "จังหวัด: [ที่อ่านได้]\n"
+                "--- ข้อมูลป้าย ---\n"
+                "[คำอธิบายประเภทและลักษณะ]\n"
+                "(หากส่วนใดอ่านไม่ชัดเจน ให้ระบุว่า 'ไม่ชัดเจน')"
             )
 
-            # *** เรียก Gemini ครั้งเดียว อ่าน OCR ***
-            response_ocr = vision_model.generate_content([prompt_ocr, img])
-            ocr_result_text = response_ocr.text
-            explanation_text = "" # รีเซ็ตคำอธิบาย
+            # *** เรียก Gemini ครั้งเดียว ***
+            response = vision_model.generate_content([prompt_combined, img])
+            reply_text = response.text # ใช้ผลลัพธ์จาก Gemini เป็นคำตอบเลย
 
-            # (พยายามดึงข้อมูลเพื่อบันทึก และขอคำอธิบาย)
+            # (พยายามดึงข้อมูลเพื่อบันทึก - ไม่มีผลต่อการตอบกลับ)
             try:
-                plate_line = next((line for line in ocr_result_text.split('\n') if "เลขทะเบียน:" in line), None)
-                prov_line = next((line for line in ocr_result_text.split('\n') if "จังหวัด:" in line), None)
+                plate_line = next((line for line in reply_text.split('\n') if "เลขทะเบียน:" in line), None)
+                prov_line = next((line for line in reply_text.split('\n') if "จังหวัด:" in line), None)
                 if plate_line and prov_line:
                     plate_number_for_log = plate_line.split(":")[-1].strip()
                     province_for_log = prov_line.split(":")[-1].strip()
                     if plate_number_for_log and province_for_log not in ["ไม่ชัดเจน", ""]:
                         log_plate(plate_number_for_log, province_for_log)
-                        if chat_session:
-                            try:
-                                # *** แก้ไข Prompt ตรงนี้ ให้ถามประเภทรถ ***
-                                prompt_explain = (
-                                    f"ป้ายทะเบียนไทย '{plate_number_for_log}' จังหวัด '{province_for_log}' "
-                                    f"เป็นป้ายของ **รถยนต์** หรือ **รถจักรยานยนต์**? " # <--- เพิ่มคำถามนี้
-                                    f"และเป็นป้ายประเภทใด (เช่น ส่วนบุคคล, สาธารณะ) "
-                                    f"มีความหมาย/ลักษณะอย่างไร (สีพื้นหลัง, สีตัวอักษร)?"
-                                )
-                                response_explain = chat_session.send_message(prompt_explain)
-                                explanation_text = "\n\n--- ข้อมูลป้าย ---\n" + response_explain.text
-                            except Exception as explain_e:
-                                print(f"Gemini explanation failed: {explain_e}")
-                                explanation_text = "\n\n(ไม่สามารถดึงข้อมูลป้ายได้)"
-                        else:
-                             explanation_text = "\n\n(Chat model not ready for explanation)"
             except Exception as log_e:
                 print(f"OCR parsing/logging failed after combined call: {log_e}")
 
         except Exception as e:
             print(f"Image handling error: {e}")
-            ocr_result_text = f"เกิดข้อผิดพลาดในการอ่านภาพ: {e}" # ถ้า OCR พัง ให้ใช้ข้อความ error นี้
-
-        # (รวมคำตอบ)
-        final_reply_text = ocr_result_text + explanation_text # เอาผล OCR + คำอธิบาย (ถ้ามี)
+            # ใช้ default error message ที่ตั้งไว้ตอนแรก
+            # อาจเพิ่มรายละเอียด error ถ้าต้องการ: reply_text = f"เกิดข้อผิดพลาด: {e}"
 
         # ส่งคำตอบกลับไป
         line_bot_api.reply_message_with_http_info(
-            ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=final_reply_text)])
+            ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply_text)])
         )
 
 # --- Handle Video ---
@@ -197,6 +185,7 @@ def handle_video_message(event):
                 ret, frame = cap.read()
                 if not ret: break
                 frame_count += 1
+                # --- (ทางเลือก) เพิ่ม Frame Skipping ตรงนี้ได้ เช่น % 90 ---
                 if frame_count % 60 != 0: continue
                 try:
                     is_success, buffer = cv2.imencode(".jpg", frame)
@@ -297,7 +286,7 @@ def handle_text_message(event):
                             for i, (plate, province, timestamp_utc) in enumerate(logs):
                                 timestamp_th = timestamp_utc.astimezone(TH_TIMEZONE)
                                 time_str = timestamp_th.strftime('%H:%M น.')
-                                reply_text += f"* {time_str}: {plate} ({province})\n" # แก้ไขเป็น province
+                                reply_text += f"* {time_str}: {plate} (จ. {province})\n"
                     except ValueError:
                         reply_text = "รูปแบบวันที่ผิด 😅 (ใช้ DD/MM/YYYY)"
                 else:
@@ -324,6 +313,7 @@ def handle_text_message(event):
 # --- Handle Default ---
 @handler.default()
 def default(event):
+    # ... (โค้ดส่วนนี้เหมือนเดิม) ...
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message_with_http_info(
@@ -337,3 +327,4 @@ def default(event):
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
+
